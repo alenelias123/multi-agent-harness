@@ -1,4 +1,3 @@
-from .cli import app
+from ._version import __version__
 
-__version__ = "0.1.0"
-__all__ = ["app"]
+__all__ = ["__version__"]

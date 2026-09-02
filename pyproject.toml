@@ -1,7 +1,7 @@
 [project]
 name = "agentcli"
-version = "0.1.0"
-description = "Multi-agent development CLI tool (Phase 1: single-user)"
+version = "0.2.0"
+description = "Multi-agent development CLI powered by free-tier LLMs"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "rich>=13.7.0",
     "sqlite-utils>=3.37.0",
     "python-dotenv>=1.0.0",
+    "platformdirs>=4.2.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,9 @@ dev = [
 
 [project.scripts]
 agentcli = "agentcli.cli:app"
+
+[project.gui-scripts]
+agentcli-gui = "agentcli.cli:app"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]

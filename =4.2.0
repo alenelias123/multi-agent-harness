@@ -1,0 +1,8 @@
+Collecting platformdirs
+  Downloading platformdirs-4.11.4-py3-none-any.whl.metadata (5.5 kB)
+Downloading platformdirs-4.11.4-py3-none-any.whl (23 kB)
+Installing collected packages: platformdirs
+Successfully installed platformdirs-4.11.4
+
+[notice] A new release of pip is available: 26.1.2 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip

@@ -1,27 +1,21 @@
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 import httpx
 
+from .base import BaseProvider, ProviderError
+
 logger = logging.getLogger(__name__)
 
-
-class OpenRouterError(Exception):
-    def __init__(
-        self,
-        message: str,
-        status_code: int | None = None,
-        response_body: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.response_body = response_body
+# Re-export for backwards compat
+OpenRouterError = ProviderError
 
 
-class OpenRouterClient:
+class OpenRouterClient(BaseProvider):
+    provider_name = "openrouter"
+
     def __init__(
         self,
         api_key: str,
@@ -112,26 +106,3 @@ class OpenRouterClient:
         message: dict[str, Any] = choices[0].get("message", {})
         content: str = message.get("content", "")
         return content
-
-    async def chat_completion_json(
-        self,
-        model: str,
-        messages: list[dict[str, str]],
-        temperature: float = 0.1,
-        max_tokens: int = 4000,
-    ) -> dict[str, Any]:
-        response_format = {"type": "json_object"}
-        content = await self.chat_completion(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=response_format,
-        )
-        try:
-            result: dict[str, Any] = json.loads(content)
-            return result
-        except json.JSONDecodeError as e:
-            raise OpenRouterError(
-                f"Invalid JSON response: {e}, content: {content[:500]}"
-            ) from e
