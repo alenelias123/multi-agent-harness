@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # --- Freebuff ---
     freebuff_enabled: bool = Field(default=False, validation_alias="FREEBUFF_ENABLED")
     freebuff_timeout: float = Field(default=120.0, validation_alias="FREEBUFF_TIMEOUT")
+    freebuff_token: str = Field(default="", validation_alias="FREEBUFF_TOKEN")
+    freebuff_auto_install: bool = Field(default=False, validation_alias="FREEBUFF_AUTO_INSTALL")
 
     # --- Generic custom providers (JSON in env) ---
     custom_providers: dict[str, ProviderConfig] = Field(

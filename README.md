@@ -31,8 +31,8 @@ agentcli --help
 # 1. Set up configuration (one-time)
 agentcli config init
 
-# 2. Edit ~/.config/agentcli/.env and add your API key
-#    (get a free key at https://openrouter.ai/keys)
+# 2. Install and configure Freebuff (one command!)
+agentcli setup
 
 # 3. Run a task
 agentcli run "Create a FastAPI REST API for a todo app with CRUD operations"
@@ -88,6 +88,46 @@ agentcli history -n 10
 agentcli show <run_id>
 ```
 
+### Context sharing
+
+Share state and task outputs across multiple agents:
+
+```bash
+# Show context store statistics
+agentcli context stats
+
+# List all context entries
+agentcli context ls
+
+# List entries in a specific namespace
+agentcli context ls --namespace run:abc123
+
+# Get a specific context entry
+agentcli context get --key task:t1:output --run-id abc123
+
+# Store a value in context
+agentcli context set --key "arch" --value "microservices" --run-id abc123
+
+# Search context entries
+agentcli context search --key "FastAPI"
+
+# Clear a namespace
+agentcli context clear --namespace run:abc123
+```
+
+### Setup (Freebuff)
+
+```bash
+# Install freebuff CLI and check auth status
+agentcli setup
+
+# Install + run the interactive auth flow
+agentcli setup --auth
+
+# Set a token directly
+agentcli setup --token YOUR_FREEBUFF_TOKEN
+```
+
 ### Configuration
 
 ```bash
@@ -139,6 +179,36 @@ LOG_LEVEL=DEBUG
 
 # Enable Freebuff provider (requires: npm install -g freebuff)
 FREEBUFF_ENABLED=true
+
+# Freebuff auth token (auto-detected from freebuff config if installed)
+FREEBUFF_TOKEN=your_freebuff_token_here
+
+# Auto-install freebuff if not found (default: false)
+FREEBUFF_AUTO_INSTALL=true
+
+# Freebuff CLI timeout in seconds (default: 120)
+FREEBUFF_TIMEOUT=120
+```
+
+### Freebuff Token Detection
+
+The freebuff auth token is detected from multiple sources (in priority order):
+
+1. **`FREEBUFF_TOKEN` env var** — set in your shell or .env file
+2. **Freebuff config.json** — auto-detected from `~/.config/freebuff/config.json`
+3. **Freebuff CLI** — run `freebuff auth` to authenticate interactively
+
+To set up authentication:
+
+```bash
+# Option 1: Interactive auth flow
+agentcli setup --auth
+
+# Option 2: Set token directly
+agentcli setup --token your_token_here
+
+# Option 3: Manual
+export FREEBUFF_TOKEN=your_token
 ```
 
 ### CLI Options
@@ -159,28 +229,81 @@ python -m agentcli --version
 python -m agentcli run "your task here"
 ```
 
+## Context Sharing
+
+The context sharing system allows multiple agents running in parallel to read and write shared context, enabling coordination and knowledge transfer between tasks.
+
+### How It Works
+
+When tasks execute, their outputs are automatically stored in a namespaced context store. Downstream tasks can read:
+
+- **Upstream task outputs** — results from dependent tasks
+- **Shared state** — project context, architecture decisions, conventions
+- **Global context** — cross-run shared knowledge
+- **Agent memory** — per-agent state with optional TTL
+
+### Namespaces
+
+| Namespace | Scope | Example |
+|-----------|-------|---------|
+| `global` | All agents, all runs | Project conventions, shared knowledge |
+| `run:{id}` | Single run | Task outputs, run-specific state |
+| `agent:{id}` | Single agent | Agent memory, preferences |
+
+### Programmatic Usage
+
+```python
+from agentcli.context import get_shared_context, get_context_bridge
+
+# Get the shared context store
+ctx = get_shared_context()
+
+# Write context
+ctx.write(key="arch", value="microservices", namespace="global", tags=["architecture"])
+
+# Read context
+value = ctx.read(key="arch", namespace="global")
+
+# Search across context
+results = ctx.search(query="FastAPI")
+
+# Get a context bridge for task execution
+bridge = get_context_bridge()
+
+# Store task outputs
+bridge.store_task_output(run_id="run-1", task_id="t1", output="done")
+
+# Store shared state
+bridge.store_shared_state(run_id="run-1", key="project_context", value="Python + FastAPI")
+```
+
 ## Architecture
 
 ```
 agentcli/
 ├── __main__.py           # python -m agentcli entrypoint
 ├── _version.py           # Single source of truth for version
-├── cli.py                # Typer CLI with run, chat, history, show, config commands
+├── cli.py                # Typer CLI with run, chat, history, show, config, setup, context commands
 ├── chat.py               # Interactive chat REPL with Rich rendering
 ├── config.py             # Settings, XDG paths, model chains, fallback config
+├── setup.py              # Freebuff install, auth, and token management
+├── context.py            # Context sharing system for multi-agent coordination
 ├── planner.py            # Planning LLM call + JSON validation
 ├── graph.py              # TaskGraph, DAG validation, ready-set computation
-├── executor.py           # Async DAG executor with semaphore concurrency control
+├── executor.py           # Async DAG executor with context integration
 ├── model_router.py       # Model selection, fallback, retry/backoff
 ├── providers/
 │   ├── base.py           # Abstract provider interface
 │   ├── openrouter.py     # Async OpenAI-compatible client for OpenRouter
-│   └── freebuff.py       # Freebuff CLI wrapper
+│   └── freebuff.py       # Freebuff CLI wrapper with token detection
 ├── storage.py            # SQLite persistence (runs, tasks)
 ├── schemas.py            # Pydantic models (Task, TaskGraph, TaskResult, Run)
 └── prompts/
     ├── chat_system.txt     # System prompt for interactive chat
     └── planner_system.txt  # System prompt enforcing strict JSON output
+
+scripts/
+└── install_freebuff.sh   # Shell script for standalone Freebuff installation
 ```
 
 ## Task Graph Schema
@@ -232,6 +355,8 @@ pytest --cov=agentcli
 # Run specific test file
 pytest tests/test_graph.py
 pytest tests/test_executor.py
+pytest tests/test_context.py
+pytest tests/test_setup.py
 ```
 
 ## Example Output

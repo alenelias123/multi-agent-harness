@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from .config import settings
+from .context import ContextBridge, SharedContext, get_context_bridge, get_shared_context
 from .model_router import ModelRouter
 from .schemas import Task, TaskGraph, TaskResult, TaskStatus
 
@@ -19,14 +20,51 @@ class ExecutionContext:
 
 
 class TaskExecutor:
-    def __init__(self, router: ModelRouter, run_id: str):
+    def __init__(self, router: ModelRouter, run_id: str,
+                 context_bridge: ContextBridge | None = None):
         self.router = router
         self.run_id = run_id
         self.semaphore = asyncio.Semaphore(settings.max_parallelism)
+        self.context_bridge = context_bridge or get_context_bridge()
 
     async def execute_task(self, task: Task, upstream_outputs: dict[str, str]) -> TaskResult:
         async with self.semaphore:
-            return await self._execute_with_retries(task, upstream_outputs)
+            # Gather additional context from shared store
+            shared_context = await self._gather_shared_context(task, upstream_outputs)
+
+            # Merge upstream outputs with shared context
+            merged_upstream = {**upstream_outputs, **shared_context}
+
+            return await self._execute_with_retries(task, merged_upstream)
+
+    async def _gather_shared_context(
+        self, task: Task, upstream_outputs: dict[str, str]
+    ) -> dict[str, str]:
+        """Read relevant context from the shared store for this task."""
+        extra: dict[str, str] = {}
+
+        try:
+            # Get all completed task outputs from this run (may include
+            # tasks from other parallel branches)
+            all_outputs = self.context_bridge.get_all_task_outputs(self.run_id)
+            for task_id, output in all_outputs.items():
+                # Skip duplicates with already-passed upstream_outputs
+                if task_id not in upstream_outputs:
+                    extra[task_id] = output
+
+            # Get shared state for this run
+            shared_state_keys = [
+                "project_context", "architecture", "conventions",
+            ]
+            for state_key in shared_state_keys:
+                val = self.context_bridge.get_shared_state(self.run_id, state_key)
+                if val:
+                    extra[f"state:{state_key}"] = val
+
+        except Exception as e:
+            logger.debug(f"Could not gather shared context: {e}")
+
+        return extra
 
     async def _execute_with_retries(
         self, task: Task, upstream_outputs: dict[str, str]
@@ -36,6 +74,15 @@ class TaskExecutor:
         for attempt in range(1, settings.task_max_retries + 1):
             try:
                 output, model = await self._call_llm(task, upstream_outputs)
+
+                # Store output in shared context for downstream tasks
+                self.context_bridge.store_task_output(
+                    run_id=self.run_id,
+                    task_id=task.id,
+                    output=output,
+                    tags=[task.task_type.value, f"attempt:{attempt}"],
+                )
+
                 return TaskResult(
                     task_id=task.id,
                     status=TaskStatus.SUCCESS,
@@ -60,14 +107,19 @@ class TaskExecutor:
     async def _call_llm(self, task: Task, upstream_outputs: dict[str, str]) -> tuple[str, str]:
         context_parts = []
         for dep_id, output in upstream_outputs.items():
-            context_parts.append(f"--- Output from {dep_id} ---\n{output}")
+            # Distinguish between task outputs and shared state
+            if dep_id.startswith("state:"):
+                state_key = dep_id[len("state:"):]
+                context_parts.append(f"--- Shared State: {state_key} ---\n{output}")
+            else:
+                context_parts.append(f"--- Output from {dep_id} ---\n{output}")
 
         context = "\n\n".join(context_parts) if context_parts else "No upstream context."
 
         system_prompt = self._get_system_prompt(task.task_type)
         user_prompt = f"""Task: {task.description}
 
-Context from upstream tasks:
+Context from upstream tasks and shared state:
 {context}
 
 Please complete this task and provide your output."""
@@ -92,7 +144,8 @@ Please complete this task and provide your output."""
             "coding": (
                 "You are an expert software engineer. Write clean, "
                 "well-documented, production-ready code. Follow best "
-                "practices for the language/framework."
+                "practices for the language/framework. When multiple "
+                "task outputs are provided, build upon them coherently."
             ),
             "analysis": (
                 "You are a senior engineer analyzing code or systems. "
@@ -116,10 +169,12 @@ Please complete this task and provide your output."""
 
 
 class DAGExecutor:
-    def __init__(self, router: ModelRouter, run_id: str):
+    def __init__(self, router: ModelRouter, run_id: str,
+                 context_bridge: ContextBridge | None = None):
         self.router = router
         self.run_id = run_id
-        self.task_executor = TaskExecutor(router, run_id)
+        self.context_bridge = context_bridge or get_context_bridge()
+        self.task_executor = TaskExecutor(router, run_id, self.context_bridge)
         self.results: dict[str, TaskResult] = {}
         self.completed: set[str] = set()
         self.failed: set[str] = set()
@@ -127,6 +182,14 @@ class DAGExecutor:
 
     async def execute(self, graph: TaskGraph) -> dict[str, TaskResult]:
         self._graph = graph
+
+        # Store the task graph in shared context for other agents to read
+        self.context_bridge.store_shared_state(
+            run_id=self.run_id,
+            key="task_graph",
+            value=graph.model_dump_json(),
+        )
+
         pending_tasks = {t.id: t for t in graph.tasks}
         running_tasks: dict[str, asyncio.Task] = {}
 
@@ -225,4 +288,5 @@ class DAGExecutor:
 
 @asynccontextmanager
 async def create_executor(router: ModelRouter, run_id: str) -> AsyncGenerator[DAGExecutor, None]:
-    yield DAGExecutor(router, run_id)
+    ctx_bridge = get_context_bridge()
+    yield DAGExecutor(router, run_id, ctx_bridge)

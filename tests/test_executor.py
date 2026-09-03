@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agentcli.context import SharedContext, get_context_bridge
 from agentcli.executor import DAGExecutor, TaskExecutor
 from agentcli.schemas import Task, TaskGraph, TaskStatus, TaskType
 
@@ -106,7 +107,8 @@ class TestTaskExecutor:
     async def test_execute_success(
         self, mock_router: MockModelRouter
     ) -> None:
-        executor = TaskExecutor(mock_router, "run-1")
+        ctx = SharedContext()
+        executor = TaskExecutor(mock_router, "run-1", context_bridge=None)
         task = Task(id="t1", description="Test task", task_type=TaskType.CODING)
         result = await executor.execute_task(task, {})
         assert result.status == TaskStatus.SUCCESS
@@ -290,3 +292,76 @@ class TestExecutorIntegration:
         )
         assert results["t1"].model_used == "planner-model"
         assert results["t2"].model_used == "coding-model"
+
+
+class TestContextSharing:
+    """Test that the executor properly stores outputs in shared context."""
+
+    @pytest.mark.asyncio
+    async def test_task_outputs_stored_in_context(self) -> None:
+        graph = TaskGraph(max_tasks=10)
+        graph.add_task(
+            Task(id="t1", description="Task 1", task_type=TaskType.CODING)
+        )
+
+        router = MockModelRouter(
+            sequence=[("t1", ("hello output", "mock-model"))]
+        )
+
+        # Use a fresh context so tests don't leak state
+        from agentcli.context import ContextBridge, SharedContext
+        ctx = SharedContext()
+        bridge = ContextBridge(ctx)
+
+        executor = DAGExecutor(router, "run-ctx-1", context_bridge=bridge)
+        await executor.execute(graph)
+
+        # Check that the output was stored in shared context
+        output = ctx.read(key="task:t1:output", namespace="run:run-ctx-1")
+        assert output == "hello output"
+
+    @pytest.mark.asyncio
+    async def test_shared_state_readable_by_downstream(self) -> None:
+        graph = TaskGraph(max_tasks=10)
+        graph.add_task(
+            Task(id="t1", description="Task 1", task_type=TaskType.CODING)
+        )
+        graph.add_task(
+            Task(
+                id="t2",
+                description="Task 2",
+                depends_on=["t1"],
+                task_type=TaskType.CODING,
+            )
+        )
+
+        # Use a fresh context
+        from agentcli.context import ContextBridge, SharedContext
+        ctx = SharedContext()
+        bridge = ContextBridge(ctx)
+
+        # Store shared state before execution
+        bridge.store_shared_state(
+            run_id="run-ctx-2",
+            key="project_context",
+            value="Python project with FastAPI",
+        )
+
+        captured_messages: list[list[dict]] = []
+
+        class StateCapturingRouter:
+            async def call(
+                self, task_type: str, messages: list[dict], **_kw: object
+            ) -> tuple[str, str]:
+                captured_messages.append(messages)
+                return ("done", "mock-model")
+
+        router = StateCapturingRouter()
+        executor = DAGExecutor(router, "run-ctx-2", context_bridge=bridge)  # type: ignore[arg-type]
+        await executor.execute(graph)
+
+        # t2's user message should contain the shared state
+        assert len(captured_messages) >= 2
+        t2_msg = captured_messages[1]
+        user_msg = next(m for m in t2_msg if m["role"] == "user")
+        assert "Python project with FastAPI" in user_msg["content"]

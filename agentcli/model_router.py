@@ -150,7 +150,10 @@ async def create_model_router() -> Any:
     # Freebuff (opt-in via FREEBUFF_ENABLED=true)
     if settings.freebuff_enabled:
         try:
-            freebuff = FreebuffClient(timeout=settings.freebuff_timeout)
+            freebuff = FreebuffClient(
+                timeout=settings.freebuff_timeout,
+                auto_install=settings.freebuff_auto_install,
+            )
             await freebuff.__aenter__()
             providers["freebuff"] = freebuff
         except ProviderError as e:

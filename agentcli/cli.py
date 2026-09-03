@@ -18,6 +18,7 @@ from rich.text import Text
 from ._version import __version__
 from .chat import run_chat
 from .config import APP_NAME, get_settings
+from .context import get_context_bridge, get_shared_context
 from .executor import create_executor
 from .model_router import ModelRouter, create_model_router
 from .planner import Planner
@@ -75,9 +76,10 @@ def _check_providers() -> None:
             "    2. Add to your .env file (in CWD or ~/.config/agentcli/):\n"
             "         OPENROUTER_API_KEY=sk-or-...\n\n"
             "  [cyan]Option B - Freebuff (zero-config)[/cyan]\n"
-            "    1. Install freebuff CLI: npm install -g freebuff\n"
-            "    2. Add to your .env:\n"
-            "         FREEBUFF_ENABLED=true\n",
+            "    1. Run: [bold]agentcli setup[/bold]\n"
+            "    2. Or install manually: npm install -g freebuff\n\n"
+            "  [cyan]Option C - Both (recommended for reliability)[/cyan]\n"
+            "    1. Set OPENROUTER_API_KEY and FREEBUFF_ENABLED=true\n",
             title="⚠  Provider Setup Required",
             border_style="yellow",
         )
@@ -443,7 +445,9 @@ def config(
                 "# Get a free API key at https://openrouter.ai/keys\n"
                 "OPENROUTER_API_KEY=\n\n"
                 "# Optional: enable Freebuff provider (requires: npm install -g freebuff)\n"
-                "# FREEBUFF_ENABLED=true\n",
+                "# FREEBUFF_ENABLED=true\n\n"
+                "# Optional: Freebuff auth token (auto-detected if installed)\n"
+                "# FREEBUFF_TOKEN=\n",
                 encoding="utf-8",
             )
             console.print(f"[green]Created {env_path}[/green]")
@@ -493,6 +497,195 @@ def chat(
         console.print("\n[dim]Goodbye![/dim]")
     except KeyboardInterrupt:
         console.print("\n[dim]Goodbye![/dim]")
+
+
+@app.command()
+def setup(
+    auth: Annotated[
+        bool, typer.Option("--auth", help="Run the interactive auth flow after install")
+    ] = False,
+    token: Annotated[
+        str | None, typer.Option("--token", help="Set a freebuff auth token directly")
+    ] = None,
+) -> None:
+    """Install and configure Freebuff CLI for agentcli.
+
+    Checks if freebuff is installed, installs it if missing, and
+    configures authentication.
+    """
+    from .setup import (
+        get_freebuff_token,
+        get_freebuff_version,
+        is_freebuff_installed,
+        install_freebuff,
+        run_auth_flow,
+        save_token_to_env,
+    )
+
+    console.print(
+        Panel(
+            "[bold]Freebuff Setup[/bold]\n\n"
+            "This will install and configure the freebuff CLI for use "
+            "with agentcli's multi-agent pipeline.",
+            title="🔧 Setup",
+            border_style="cyan",
+        )
+    )
+
+    # Step 1: Check/install
+    version = get_freebuff_version()
+    if is_freebuff_installed():
+        console.print(f"[green]✓ freebuff {version} is already installed[/green]")
+    else:
+        console.print("[yellow]→ Installing freebuff CLI...[/yellow]")
+        if not install_freebuff():
+            console.print("[red]✗ Installation failed. Install manually:[/red]")
+            console.print("  [cyan]npm install -g freebuff[/cyan]")
+            raise typer.Exit(1)
+
+    # Step 2: Token
+    if token:
+        console.print(f"[cyan]→ Saving provided token to .env...[/cyan]")
+        env_path = save_token_to_env(token)
+        console.print(f"[green]✓ Token saved to {env_path}[/green]")
+    elif auth:
+        console.print("[cyan]→ Running auth flow...[/cyan]")
+        if not run_auth_flow():
+            console.print("[yellow]⚠ Auth may have been skipped. You can set it later:[/yellow]")
+            console.print("  [cyan]agentcli setup --token YOUR_TOKEN[/cyan]")
+    else:
+        existing_token = get_freebuff_token()
+        if existing_token:
+            console.print("[green]✓ Auth token already configured[/green]")
+        else:
+            console.print("[yellow]⚠ No auth token found.[/yellow]")
+            console.print("  Options:")
+            console.print("    1. Run: [cyan]agentcli setup --auth[/cyan]")
+            console.print("    2. Or:  [cyan]agentcli setup --token YOUR_TOKEN[/cyan]")
+            console.print("    3. Or:  [cyan]export FREEBUFF_TOKEN=your_token[/cyan]")
+
+    # Step 3: Summary
+    console.print()
+    token = get_freebuff_token()
+    if token:
+        console.print("[green]✓ Freebuff is ready to use![/green]")
+        console.print()
+        console.print("[cyan]To enable in agentcli, add to your .env:[/cyan]")
+        console.print("  [green]FREEBUFF_ENABLED=true[/green]")
+    else:
+        console.print("[yellow]Freebuff installed but needs authentication.[/yellow]")
+        console.print("  Run: [cyan]agentcli setup --auth[/cyan]")
+
+
+@app.command("context")
+def context_cmd(
+    action: Annotated[
+        str, typer.Argument(help="Action: 'ls', 'get', 'stats', 'clear'")
+    ] = "stats",
+    key: Annotated[
+        str | None, typer.Option("--key", "-k", help="Context key to read/write")
+    ] = None,
+    value: Annotated[
+        str | None, typer.Option("--value", "-v", help="Value to write")
+    ] = None,
+    namespace: Annotated[
+        str | None, typer.Option("--namespace", "-n", help="Context namespace")
+    ] = None,
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", "-r", help="Run ID (for run-scoped context)")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max entries to show")] = 20,
+) -> None:
+    """Manage shared context for multi-agent coordination."""
+    from .context import SharedContext
+
+    ctx = SharedContext()
+
+    if action == "stats":
+        stats = ctx.get_stats()
+        table = Table(title="Context Store Stats")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Total Entries", str(stats["total_entries"]))
+        table.add_row("Namespaces", str(stats["total_namespaces"]))
+        table.add_row("Unique Tags", ", ".join(stats["unique_tags"]) or "—")
+        console.print(table)
+
+    elif action == "ls":
+        entries = ctx.read_all(namespace=namespace, limit=limit)
+        if not entries:
+            console.print("[yellow]No context entries found.[/yellow]")
+            return
+
+        table = Table(title="Context Entries")
+        table.add_column("Namespace", style="cyan")
+        table.add_column("Key", style="green")
+        table.add_column("Source", style="dim")
+        table.add_column("Tags", style="magenta")
+        table.add_column("Value (preview)", style="white")
+
+        for entry in entries:
+            value_preview = entry.value[:60] + ("..." if len(entry.value) > 60 else "")
+            table.add_row(
+                entry.namespace,
+                entry.key,
+                entry.source_agent or "—",
+                ", ".join(entry.tags[:3]) or "—",
+                value_preview,
+            )
+        console.print(table)
+
+    elif action == "get":
+        if not key:
+            console.print("[red]--key is required for 'get'[/red]")
+            raise typer.Exit(1)
+
+        ns = namespace or f"run:{run_id}" if run_id else "global"
+        val = ctx.read(key=key, namespace=ns)
+        if val:
+            console.print(Panel(val, title=f"[{ns}] {key}", border_style="green"))
+        else:
+            console.print(f"[yellow]Key '{key}' not found in namespace '{ns}'[/yellow]")
+
+    elif action == "set":
+        if not key or not value:
+            console.print("[red]--key and --value are required for 'set'[/red]")
+            raise typer.Exit(1)
+
+        ns = namespace or f"run:{run_id}" if run_id else "global"
+        ctx.write(key=key, value=value, namespace=ns)
+        console.print(f"[green]✓ Stored [{ns}] {key}[/green]")
+
+    elif action == "clear":
+        if namespace:
+            count = ctx.clear_namespace(namespace)
+            console.print(f"[green]✓ Cleared {count} entries from '{namespace}'[/green]")
+        else:
+            console.print("[yellow]Use --namespace to specify which namespace to clear[/yellow]")
+
+    elif action == "search":
+        if not key:
+            console.print("[red]--key is required as search query[/red]")
+            raise typer.Exit(1)
+
+        results = ctx.search(query=key, namespace=namespace)
+        if not results:
+            console.print(f"[yellow]No results for '{key}'[/yellow]")
+            return
+
+        table = Table(title=f"Search Results: '{key}'")
+        table.add_column("Namespace", style="cyan")
+        table.add_column("Key", style="green")
+        table.add_column("Value (preview)", style="white")
+
+        for entry in results:
+            value_preview = entry.value[:80] + ("..." if len(entry.value) > 80 else "")
+            table.add_row(entry.namespace, entry.key, value_preview)
+        console.print(table)
+
+    else:
+        console.print(f"[red]Unknown action: {action}. Use ls|get|set|clear|search|stats[/red]")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
