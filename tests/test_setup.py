@@ -129,14 +129,22 @@ class TestGetFreebuffToken:
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("agentcli.setup.get_token_from_config")
-    def test_falls_back_to_config(self, mock_config: MagicMock) -> None:
+    @patch("agentcli.setup.get_token_from_env")
+    def test_falls_back_to_config(
+        self, mock_env: MagicMock, mock_config: MagicMock
+    ) -> None:
+        mock_env.return_value = None
         mock_config.return_value = "config-token"
         token = get_freebuff_token()
         assert token == "config-token"
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("agentcli.setup.get_token_from_config")
-    def test_returns_none_when_no_token(self, mock_config: MagicMock) -> None:
+    @patch("agentcli.setup.get_token_from_env")
+    def test_returns_none_when_no_token(
+        self, mock_env: MagicMock, mock_config: MagicMock
+    ) -> None:
+        mock_env.return_value = None
         mock_config.return_value = None
         token = get_freebuff_token()
         assert token is None

@@ -17,6 +17,7 @@ from tenacity import (
 from .config import settings
 from .providers.base import BaseProvider, ProviderError
 from .providers.freebuff import FreebuffClient
+from .providers.opencode import OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL, OpenCodeClient
 from .providers.openrouter import OpenRouterClient
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ def _parse_model_ref(model_ref: str) -> tuple[str, str]:
         return "openrouter", model_ref
     # 'openrouter/google/gemma-4-31b-it:free' -> ('openrouter', 'google/gemma-4-31b-it:free')
     first, rest = model_ref.split("/", 1)
-    known = {"openrouter", "freebuff"}
+    known = {"openrouter", "freebuff", "opencode"}
     if first in known:
         return first, rest
     # Unknown prefix — treat the whole thing as an openrouter model
@@ -159,6 +160,22 @@ async def create_model_router() -> Any:
         except ProviderError as e:
             logger.warning(f"Freebuff provider unavailable: {e}")
 
+    # OpenCode (opt-in via OPENCODE_API_KEY)
+    if settings.opencode_api_key:
+        base_url = settings.opencode_base_url
+        # Auto-select base URL from tier if user hasn't overridden
+        if base_url == OPENCODE_ZEN_BASE_URL and settings.opencode_tier == "go":
+            base_url = OPENCODE_GO_BASE_URL
+        try:
+            opencode = OpenCodeClient(
+                api_key=settings.opencode_api_key,
+                base_url=base_url,
+            )
+            await opencode.__aenter__()
+            providers["opencode"] = opencode
+        except ProviderError as e:
+            logger.warning(f"OpenCode provider unavailable: {e}")
+
     # Custom providers from config
     for name, cfg in settings.custom_providers.items():
         if cfg.enabled and cfg.base_url:
@@ -175,7 +192,8 @@ async def create_model_router() -> Any:
 
     if not providers:
         raise ModelRoutingError(
-            "No providers available. Set OPENROUTER_API_KEY or enable FREEBUFF_ENABLED."
+            "No providers available. Set OPENROUTER_API_KEY, OPENCODE_API_KEY, "
+            "or enable FREEBUFF_ENABLED."
         )
 
     try:

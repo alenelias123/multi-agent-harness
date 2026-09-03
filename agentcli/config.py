@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     freebuff_token: str = Field(default="", validation_alias="FREEBUFF_TOKEN")
     freebuff_auto_install: bool = Field(default=False, validation_alias="FREEBUFF_AUTO_INSTALL")
 
+    # --- OpenCode ---
+    opencode_api_key: str = Field(default="", validation_alias="OPENCODE_API_KEY")
+    opencode_base_url: str = Field(
+        default="https://opencode.ai/zen/v1", validation_alias="OPENCODE_BASE_URL"
+    )
+    opencode_tier: str = Field(
+        default="zen",
+        validation_alias="OPENCODE_TIER",
+        description="'zen' for pay-per-use or 'go' for low-cost subscription",
+    )
+
     # --- Generic custom providers (JSON in env) ---
     custom_providers: dict[str, ProviderConfig] = Field(
         default_factory=dict,
@@ -72,29 +83,43 @@ class Settings(BaseSettings):
 
     default_user_id: str = "local"
 
-    # Model chains use provider prefix: "openrouter/model-name" or "freebuff/model-name"
+    # Model chains use provider prefix:
+    #   "openrouter/model-name", "freebuff/default", "opencode/model-name"
+    #
+    # OpenCode models are selected by task complexity:
+    #   planning / analysis  → stronger reasoning models (opus, gemini-2.5-pro)
+    #   coding               → code-specialized models (sonnet, codex)
+    #   writing / general    → fast, capable models (flash, haiku)
     task_type_models: dict[str, list[str]] = Field(
         default_factory=lambda: {
             "planning": [
+                "opencode/anthropic/claude-sonnet-4-5",
+                "opencode/google/gemini-2.5-pro",
                 "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
                 "openrouter/google/gemma-4-31b-it:free",
                 "freebuff/default",
                 "openrouter/openrouter/free",
             ],
             "coding": [
+                "opencode/anthropic/claude-sonnet-4-5",
+                "opencode/openai/codex-mini-latest",
+                "opencode/google/gemini-2.5-flash",
                 "openrouter/google/gemma-4-31b-it:free",
                 "openrouter/cohere/north-mini-code:free",
-                "openrouter/nvidia/nemotron-3.5-lightning:free",
                 "freebuff/default",
                 "openrouter/openrouter/free",
             ],
             "analysis": [
+                "opencode/anthropic/claude-sonnet-4-5",
+                "opencode/google/gemini-2.5-pro",
                 "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
                 "openrouter/google/gemma-4-31b-it:free",
                 "freebuff/default",
                 "openrouter/openrouter/free",
             ],
             "writing": [
+                "opencode/google/gemini-2.5-flash",
+                "opencode/anthropic/claude-haiku-3-5",
                 "openrouter/google/gemma-4-31b-it:free",
                 "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
                 "openrouter/minimax/minimax-m3:free",
@@ -102,9 +127,10 @@ class Settings(BaseSettings):
                 "openrouter/openrouter/free",
             ],
             "general": [
+                "opencode/google/gemini-2.5-flash",
+                "opencode/anthropic/claude-haiku-3-5",
                 "openrouter/nvidia/nemotron-3.5-lightning:free",
                 "openrouter/google/gemma-4-31b-it:free",
-                "openrouter/stealth/ox-alpha",
                 "freebuff/default",
                 "openrouter/openrouter/free",
             ],

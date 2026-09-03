@@ -74,22 +74,22 @@ def _check_providers() -> None:
     """Fail fast with a clear message when no LLM provider is configured."""
     from .config import settings as s
 
-    if s.openrouter_api_key or s.freebuff_enabled:
+    if s.openrouter_api_key or s.freebuff_enabled or s.opencode_api_key:
         return
 
     console.print(
         Panel(
             "[bold]No LLM provider configured.[/bold]\n\n"
             "To get started, choose one of:\n\n"
-            "  [cyan]Option A - OpenRouter (recommended)[/cyan]\n"
+            "  [cyan]Option A - OpenRouter (free tier available)[/cyan]\n"
             "    1. Get a free API key at [link]https://openrouter.ai/keys[/link]\n"
-            "    2. Add to your .env file (in CWD or ~/.config/agentcli/):\n"
-            "         OPENROUTER_API_KEY=sk-or-...\n\n"
-            "  [cyan]Option B - Freebuff (zero-config)[/cyan]\n"
+            "    2. Add to .env:  OPENROUTER_API_KEY=sk-or-...\n\n"
+            "  [cyan]Option B - OpenCode Zen (pay-per-use, premium models)[/cyan]\n"
+            "    1. Get an API key at [link]https://opencode.ai/auth[/link]\n"
+            "    2. Add to .env:  OPENCODE_API_KEY=...\n\n"
+            "  [cyan]Option C - Freebuff (zero-config)[/cyan]\n"
             "    1. Run: [bold]agentcli setup[/bold]\n"
-            "    2. Or install manually: npm install -g freebuff\n\n"
-            "  [cyan]Option C - Both (recommended for reliability)[/cyan]\n"
-            "    1. Set OPENROUTER_API_KEY and FREEBUFF_ENABLED=true\n",
+            "    2. Or: npm install -g freebuff\n",
             title="⚠  Provider Setup Required",
             border_style="yellow",
         )
@@ -581,6 +581,139 @@ def setup(
     else:
         console.print("[yellow]Freebuff installed but needs authentication.[/yellow]")
         console.print("  Run: [cyan]agentcli setup --auth[/cyan]")
+
+
+@app.command()
+def opencode(
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", "-k", help="OpenCode API key (will prompt if not provided)"),
+    ] = None,
+    tier: Annotated[
+        str,
+        typer.Option(
+            "--tier",
+            "-t",
+            help="Service tier: 'zen' (pay-per-use) or 'go' (low-cost subscription)",
+        ),
+    ] = "zen",
+) -> None:
+    """Configure OpenCode as an LLM provider.
+
+    Get your API key at https://opencode.ai/auth
+    """
+    from pathlib import Path as _P
+
+    from .config import _find_dotenv
+
+    # Interactive API key prompt if not provided
+    if not api_key:
+        console.print(
+            Panel(
+                "[bold]OpenCode Setup[/bold]\n\n"
+                "OpenCode provides premium AI models via OpenAI-compatible API.\n\n"
+                "  [cyan]Zen[/cyan]  — pay-per-use, access to Claude, GPT, Gemini\n"
+                "  [cyan]Go[/cyan]   — low-cost subscription, open coding models\n\n"
+                "Get your API key at: [link]https://opencode.ai/auth[/link]",
+                title="🔗 OpenCode",
+                border_style="cyan",
+            )
+        )
+        try:
+            api_key = console.input("[bold]Enter your OpenCode API key:[/bold] ")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]Setup cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    api_key = api_key.strip() if api_key else ""
+    if not api_key:
+        console.print("[red]API key cannot be empty.[/red]")
+        raise typer.Exit(1)
+
+    if tier not in ("zen", "go"):
+        console.print("[red]Invalid tier. Use 'zen' or 'go'.[/red]")
+        raise typer.Exit(1)
+
+    # Determine base URL
+    from .providers.opencode import OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL
+
+    base_url = OPENCODE_GO_BASE_URL if tier == "go" else OPENCODE_ZEN_BASE_URL
+
+    # Save to .env
+    env_path = _P(".env")
+    lines: list[str] = []
+    key_written = False
+    tier_written = False
+    url_written = False
+
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("OPENCODE_API_KEY="):
+                lines.append(f"OPENCODE_API_KEY={api_key}")
+                key_written = True
+            elif stripped.startswith("OPENCODE_TIER="):
+                lines.append(f"OPENCODE_TIER={tier}")
+                tier_written = True
+            elif stripped.startswith("OPENCODE_BASE_URL="):
+                lines.append(f"OPENCODE_BASE_URL={base_url}")
+                url_written = True
+            else:
+                lines.append(line)
+
+    if not key_written:
+        lines.append(f"OPENCODE_API_KEY={api_key}")
+    if not tier_written:
+        lines.append(f"OPENCODE_TIER={tier}")
+    if not url_written:
+        lines.append(f"OPENCODE_BASE_URL={base_url}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Verify the key works
+    console.print(f"\n[cyan]→ Verifying API key ({tier} tier)...[/cyan]")
+    try:
+        import httpx as _httpx
+
+        with _httpx.Client(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        ) as client:
+            resp = client.get("/models")
+            if resp.status_code == 200:
+                models_data = resp.json()
+                model_count = len(models_data.get("data", []))
+                console.print(
+                    f"[green]✓ API key verified! {model_count} models available.[/green]"
+                )
+            elif resp.status_code == 401:
+                console.print("[red]✗ Invalid API key. Please check your key.[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(
+                    f"[yellow]⚠ Could not verify key (HTTP {resp.status_code}). "
+                    f"Saved anyway.[/yellow]"
+                )
+    except Exception as e:
+        console.print(
+            f"[yellow]⚠ Could not verify key: {e}. Saved anyway.[/yellow]"
+        )
+
+    console.print(
+        Panel(
+            f"[bold]OpenCode configured![/bold]\n\n"
+            f"  [cyan]Tier:[/cyan]    {tier}\n"
+            f"  [cyan]Base URL:[/cyan] {base_url}\n"
+            f"  [cyan]Env file:[/cyan] {env_path.resolve()}\n\n"
+            "Models are automatically selected by task complexity:\n"
+            "  Planning/Analysis → Claude Sonnet, Gemini Pro\n"
+            "  Coding            → Claude Sonnet, Codex Mini\n"
+            "  Writing/General   → Gemini Flash, Claude Haiku",
+            title="✓ OpenCode Ready",
+            border_style="green",
+        )
+    )
 
 
 @app.command("context")
