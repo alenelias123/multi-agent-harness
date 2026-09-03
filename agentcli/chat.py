@@ -42,7 +42,14 @@ SLASH_COMMANDS = {
 }
 
 
-def _load_system_prompt() -> str:
+def _load_system_prompt(override_path: str | None = None) -> str:
+    if override_path:
+        from pathlib import Path as _P
+
+        p = _P(override_path)
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
+        raise FileNotFoundError(f"System prompt file not found: {override_path}")
     try:
         return SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -52,9 +59,9 @@ def _load_system_prompt() -> str:
 class ChatSession:
     """Manages an interactive chat session with an LLM."""
 
-    def __init__(self, router: ModelRouter) -> None:
+    def __init__(self, router: ModelRouter, system_prompt_path: str | None = None) -> None:
         self.router = router
-        self.system_prompt = _load_system_prompt()
+        self.system_prompt = _load_system_prompt(override_path=system_prompt_path)
         self.messages: list[dict[str, str]] = []
         self.current_model: str | None = None
         self.console = Console()
@@ -201,12 +208,12 @@ def _handle_slash_command(
     return True
 
 
-async def run_chat(model: str | None = None) -> None:
+async def run_chat(model: str | None = None, system_prompt_path: str | None = None) -> None:
     """Run the interactive chat REPL."""
     console = Console()
 
     async with create_model_router() as router:
-        session = ChatSession(router)
+        session = ChatSession(router, system_prompt_path=system_prompt_path)
         _print_welcome(console)
 
         if model:

@@ -59,13 +59,15 @@ class TestGetTokenFromEnv:
 
 
 class TestGetTokenFromConfig:
-    def test_no_config_file(self) -> None:
+    @patch("agentcli.setup._manicode_credentials_path", return_value=Path("/nonexistent/credentials.json"))
+    def test_no_config_file(self, _mock_cred: MagicMock) -> None:
         with patch("agentcli.setup.freebuff_config_path") as mock_path:
             mock_path.return_value = Path("/nonexistent/config.json")
             token = get_token_from_config()
             assert token is None
 
-    def test_valid_config_with_token(self, tmp_path: Path) -> None:
+    @patch("agentcli.setup._manicode_credentials_path", return_value=Path("/nonexistent/credentials.json"))
+    def test_valid_config_with_token(self, _mock_cred: MagicMock, tmp_path: Path) -> None:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({"token": "abc-123"}))
 
@@ -74,7 +76,8 @@ class TestGetTokenFromConfig:
             token = get_token_from_config()
             assert token == "abc-123"
 
-    def test_valid_config_with_api_key(self, tmp_path: Path) -> None:
+    @patch("agentcli.setup._manicode_credentials_path", return_value=Path("/nonexistent/credentials.json"))
+    def test_valid_config_with_api_key(self, _mock_cred: MagicMock, tmp_path: Path) -> None:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({"api_key": "key-456"}))
 
@@ -83,7 +86,8 @@ class TestGetTokenFromConfig:
             token = get_token_from_config()
             assert token == "key-456"
 
-    def test_empty_config(self, tmp_path: Path) -> None:
+    @patch("agentcli.setup._manicode_credentials_path", return_value=Path("/nonexistent/credentials.json"))
+    def test_empty_config(self, _mock_cred: MagicMock, tmp_path: Path) -> None:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({}))
 
@@ -92,7 +96,8 @@ class TestGetTokenFromConfig:
             token = get_token_from_config()
             assert token is None
 
-    def test_invalid_json(self, tmp_path: Path) -> None:
+    @patch("agentcli.setup._manicode_credentials_path", return_value=Path("/nonexistent/credentials.json"))
+    def test_invalid_json(self, _mock_cred: MagicMock, tmp_path: Path) -> None:
         config_file = tmp_path / "config.json"
         config_file.write_text("not json {{{")
 
@@ -100,6 +105,20 @@ class TestGetTokenFromConfig:
             mock_path.return_value = config_file
             token = get_token_from_config()
             assert token is None
+
+    def test_reads_manicode_credentials(self, tmp_path: Path) -> None:
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps({
+            "default": {
+                "authToken": "manicode-token-xyz",
+                "name": "Test User",
+            }
+        }))
+
+        with patch("agentcli.setup._manicode_credentials_path") as mock_path:
+            mock_path.return_value = creds_file
+            token = get_token_from_config()
+            assert token == "manicode-token-xyz"
 
 
 class TestGetFreebuffToken:

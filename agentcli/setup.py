@@ -1,9 +1,8 @@
 """Setup utilities for Freebuff CLI — install, auth, and token management.
 
-The freebuff CLI stores its auth token in a JSON config file at:
-  - ~/.config/freebuff/config.json   (Linux)
-  - ~/Library/Application Support/freebuff/config.json  (macOS)
-  - %APPDATA%/freebuff/config.json   (Windows)
+The freebuff CLI stores its auth token in:
+  - ~/.config/manicode/credentials.json (actual location, under 'authToken')
+  - ~/.config/freebuff/config.json       (legacy fallback)
 
 This module detects and manages that token, bridging it into agentcli's
 .env-based configuration.
@@ -77,26 +76,66 @@ def get_freebuff_version() -> str | None:
 
 # ── Token Management ─────────────────────────────────────────────────────
 
-def get_token_from_config() -> str | None:
-    """Read the auth token from freebuff's config.json file.
+def _manicode_credentials_path() -> Path:
+    """Return the path to manicode's credentials.json (where freebuff stores tokens)."""
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "manicode" / "credentials.json"
+    elif sys.platform == "win32":
+        appdata = home / "AppData" / "Roaming"
+        return appdata / "manicode" / "credentials.json"
+    else:
+        return home / ".config" / "manicode" / "credentials.json"
 
-    Checks multiple possible key names: 'token', 'api_key', 'auth_token'.
-    """
-    config_file = freebuff_config_path()
-    if not config_file.is_file():
+
+def _read_token_from_json(path: Path) -> str | None:
+    """Read a token value from a JSON file, trying common key names."""
+    if not path.is_file():
         return None
-
     try:
-        with open(config_file, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        logger.debug(f"Failed to read freebuff config: {e}")
+        logger.debug(f"Failed to read {path}: {e}")
         return None
 
-    for key in ("token", "api_key", "auth_token", "apiKey", "accessToken"):
+    for key in ("authToken", "token", "api_key", "auth_token", "apiKey", "accessToken"):
         val = cfg.get(key)
         if val and isinstance(val, str) and len(val) > 0:
             return val
+
+    return None
+
+
+def get_token_from_config() -> str | None:
+    """Read the auth token from freebuff's credentials file.
+
+    Checks both the manicode credentials.json (primary) and the
+    legacy freebuff config.json (fallback).
+    """
+    # Primary: ~/.config/manicode/credentials.json → authToken
+    token = _read_token_from_json(_manicode_credentials_path())
+    if token:
+        return token
+
+    # Fallback: ~/.config/freebuff/config.json
+    token = _read_token_from_json(freebuff_config_path())
+    if token:
+        return token
+
+    # Fallback: any profile inside credentials.json
+    creds_path = _manicode_credentials_path()
+    if creds_path.is_file():
+        try:
+            with open(creds_path, encoding="utf-8") as f:
+                creds = json.load(f)
+            for profile in creds.values():
+                if isinstance(profile, dict):
+                    val = profile.get("authToken")
+                    if val and isinstance(val, str) and len(val) > 0:
+                        return val
+        except (json.JSONDecodeError, OSError):
+            pass
 
     return None
 
@@ -228,7 +267,7 @@ def run_auth_flow() -> bool:
     console.print("[cyan]→ Starting freebuff authentication...[/cyan]")
     try:
         result = subprocess.run(
-            [freebuff_bin, "auth"],
+            [freebuff_bin, "login"],
             timeout=120,
         )
         if result.returncode == 0:
