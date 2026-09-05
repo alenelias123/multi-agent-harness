@@ -135,6 +135,9 @@ class SharedContext:
         self._db_path = db_path or Path(":memory:")
         self._memory_cache: dict[str, dict[str, ContextEntry]] = defaultdict(dict)
         self._is_memory = db_path is None
+        # Create parent directory for file-based DBs
+        if not self._is_memory:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
         # For in-memory databases, keep a persistent connection
         self._persistent_conn: sqlite3.Connection | None = None
         if self._is_memory:
@@ -497,25 +500,36 @@ class ContextBridge:
 
 # ── Module-level singleton ───────────────────────────────────────────────
 
-_shared_context: SharedContext | None = None
-_context_bridge: ContextBridge | None = None
+_shared_contexts: dict[str, SharedContext] = {}
+_context_bridges: dict[str, ContextBridge] = {}
+
+
+def _db_key(db_path: Path | None) -> str:
+    """Stable key for a context DB path."""
+    if db_path is None:
+        return ":memory:"
+    return str(db_path.resolve())
 
 
 def get_shared_context(db_path: Path | None = None) -> SharedContext:
-    """Get or create the shared context singleton."""
-    global _shared_context
-    if _shared_context is None:
-        _shared_context = SharedContext(db_path=db_path)
-    return _shared_context
+    """Get or create a :class:`SharedContext` for *db_path*.
+
+    When *db_path* is ``None`` the in-memory store is used.  Different
+    paths get independent stores, so project-local context stays isolated.
+    """
+    key = _db_key(db_path)
+    if key not in _shared_contexts:
+        _shared_contexts[key] = SharedContext(db_path=db_path)
+    return _shared_contexts[key]
 
 
 def get_context_bridge(db_path: Path | None = None) -> ContextBridge:
-    """Get or create the context bridge singleton."""
-    global _context_bridge
-    if _context_bridge is None:
+    """Get or create a :class:`ContextBridge` for *db_path*."""
+    key = _db_key(db_path)
+    if key not in _context_bridges:
         ctx = get_shared_context(db_path=db_path)
-        _context_bridge = ContextBridge(ctx)
-    return _context_bridge
+        _context_bridges[key] = ContextBridge(ctx)
+    return _context_bridges[key]
 
 
 # ── AgentReference (file-based, agent-native context) ─────────────────────
@@ -759,13 +773,14 @@ def export_reference(
     tags: list[str] | None = None,
     origin_run_id: str | None = None,
     output_path: Path | str | None = None,
+    db_path: Path | None = None,
 ) -> AgentReference:
     """Convenience: build + optionally save an :class:`AgentReference`.
 
     Parameters
     ----------
     context:
-        Source context (defaults to the singleton).
+        Source context (defaults to the store for *db_path*).
     namespace:
         Restrict to one namespace.
     tags:
@@ -774,8 +789,10 @@ def export_reference(
         Embed in the file metadata.
     output_path:
         If given, save to disk and return the path.
+    db_path:
+        Context DB to read from (defaults to the in-memory singleton).
     """
-    ctx = context or get_shared_context()
+    ctx = context or get_shared_context(db_path=db_path)
     ref = AgentReference.from_context(
         ctx, namespace=namespace, tags=tags, origin_run_id=origin_run_id
     )
@@ -788,11 +805,12 @@ def export_reference(
 def import_reference(
     path: Path | str,
     context: SharedContext | None = None,
+    db_path: Path | None = None,
 ) -> int:
     """Load a ``.agentref.json`` file into the shared context.
 
     Returns the number of entries imported.
     """
     ref = AgentReference.load(path)
-    ctx = context or get_shared_context()
+    ctx = context or get_shared_context(db_path=db_path)
     return ref.load_into(ctx)

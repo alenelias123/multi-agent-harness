@@ -995,6 +995,28 @@ def context_cmd(
 
 
 @app.command("ref")
+def _project_dir() -> Path:
+    """Return the project-local data directory for agentcli.
+
+    Uses ``.agentcli/`` inside the current working directory when present,
+    otherwise falls back to the user-level platformdirs directory.  This
+    lets each project carry its own context DB and reference files without
+    needing a virtualenv.
+    """
+    cwd = Path.cwd()
+    local = cwd / ".agentcli"
+    if local.exists() or any(local.glob("*.db")):
+        return local
+    from platformdirs import user_data_dir
+    return Path(user_data_dir(APP_NAME))
+
+
+def _project_db_path() -> Path:
+    """DB path for the current project (or user-level fallback)."""
+    return _project_dir() / "context.db"
+
+
+@app.command("ref")
 def ref_cmd(
     action: Annotated[
         str,
@@ -1026,6 +1048,10 @@ def ref_cmd(
         str | None,
         typer.Option("--run-id", "-r", help="Origin run ID (for 'create')"),
     ] = None,
+    db_path: Annotated[
+        Path | None,
+        typer.Option("--db-path", help="Override context DB location"),
+    ] = None,
 ) -> None:
     """Manage ``.agentref.json`` files — portable, agent-native context.
 
@@ -1038,18 +1064,30 @@ def ref_cmd(
     if tags:
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
 
+    # Default file paths — project-local when not overridden
+    if source is None and action in ("show", "slice", "import", "stats"):
+        default_ref_path = Path.cwd() / ".agentref.json"
+        if not default_ref_path.exists():
+            console.print(
+                f"[yellow]No .agentref.json found in {Path.cwd()}[/yellow]\n"
+                "  Create one with:  agentcli ref create"
+                "  Or pass --source explicitly."
+            )
+            raise typer.Exit(1)
+        source = default_ref_path
+
+    # Determine context DB — project-local by default
+    ctx_db = db_path or _project_db_path()
+
     if action == "create":
-        ctx = get_shared_context()
         ref = export_reference(
-            ctx,
             namespace=namespace,
             tags=tag_list,
             origin_run_id=run_id,
+            db_path=ctx_db,
         )
-        if not output:
-            console.print("[yellow]--output is required for 'create'[/yellow]")
-            raise typer.Exit(1)
-        path = ref.save(output)
+        out_path = output or Path.cwd() / ".agentref.json"
+        path = ref.save(out_path)
         stats = ref.summary()
         console.print(
             Panel(
@@ -1064,9 +1102,6 @@ def ref_cmd(
         )
 
     elif action == "show":
-        if not source:
-            console.print("[yellow]--source is required for 'show'[/yellow]")
-            raise typer.Exit(1)
         ref = AgentReference.load(source)
         stats = ref.summary()
         console.print(
@@ -1090,12 +1125,8 @@ def ref_cmd(
                 console.print(f"    [green]{k}[/green]  {preview}")
 
     elif action == "slice":
-        if not source:
-            console.print("[yellow]--source is required for 'slice'[/yellow]")
-            raise typer.Exit(1)
         if not output:
-            console.print("[yellow]--output is required for 'slice'[/yellow]")
-            raise typer.Exit(1)
+            output = Path.cwd() / ".agentref.slice.json"
         ref = AgentReference.load(source)
         sliced = ref.slice(
             namespaces=namespace.split(",") if namespace else None,
@@ -1116,11 +1147,7 @@ def ref_cmd(
         )
 
     elif action == "import":
-        if not source:
-            console.print("[yellow]--source is required for 'import'[/yellow]")
-            raise typer.Exit(1)
-        ctx = get_shared_context()
-        count = import_reference(source, ctx)
+        count = import_reference(source, db_path=ctx_db)
         console.print(
             Panel(
                 f"[bold]✓ Imported {count} entries[/bold] from {source}",
@@ -1130,9 +1157,6 @@ def ref_cmd(
         )
 
     elif action == "stats":
-        if not source:
-            console.print("[yellow]--source is required for 'stats'[/yellow]")
-            raise typer.Exit(1)
         ref = AgentReference.load(source)
         stats = ref.summary()
         table = Table(title="agentref stats")
