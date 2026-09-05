@@ -25,6 +25,15 @@ agentcli --version
 agentcli --help
 ```
 
+### Launch the TUI dashboard
+
+Running `agentcli` with no command opens the full-screen TUI dashboard,
+which bundles every CLI feature into one interactive screen:
+
+```bash
+agentcli            # open the dashboard (plan, run, history, chat, ...)
+```
+
 ## Quick Start
 
 ```bash

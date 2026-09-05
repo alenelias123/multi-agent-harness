@@ -117,3 +117,153 @@ def compute_execution_order(graph: TaskGraph) -> list[list[Task]]:
         levels[level].append(task)
 
     return levels
+
+
+def render_dag_ascii(
+    graph: TaskGraph,
+    statuses: dict[str, str] | None = None,
+    completed: set[str] | None = None,
+    failed: set[str] | None = None,
+    running: str | None = None,
+) -> str:
+    """Render the task graph as an ASCII art DAG.
+
+    Example output::
+
+        ┌─ t1 ──────────────┐
+        │ Design DB schema   │
+        └────────┬───────────┘
+           ┌─────┴─────┐
+           ▼           ▼
+        ┌─ t2 ─┐   ┌─ t3 ─┐
+        │Models│   │Routes│
+        └──┬───┘   └──┬───┘
+           └────┬─────┘
+                ▼
+           ┌─ t5 ─┐
+           │Tests │
+           └──────┘
+
+    Parameters
+    ----------
+    graph:
+        The task graph to render.
+    completed:
+        Set of task IDs that have completed successfully.
+    failed:
+        Set of task IDs that have failed.
+    running:
+        The task ID currently running, or None.
+    """
+    completed = completed or set()
+    failed = failed or set()
+    statuses = statuses or {}
+
+    if not graph.tasks:
+        return "[empty graph]"
+
+    levels = compute_execution_order(graph)
+
+    # Build a mapping from task ID to its level and position
+    task_level: dict[str, int] = {}
+    for level_idx, level_tasks in enumerate(levels):
+        for task in level_tasks:
+            task_level[task.id] = level_idx
+
+    # Build adjacency: parent -> children
+    children: dict[str, list[str]] = {t.id: [] for t in graph.tasks}
+    for task in graph.tasks:
+        for dep_id in task.depends_on:
+            children.setdefault(dep_id, []).append(task.id)
+
+    # Assign column positions using a simple BFS layout
+    task_col: dict[str, int] = {}
+    col_counter = 0
+    for level_tasks in levels:
+        for task in level_tasks:
+            task_col[task.id] = col_counter
+            col_counter += 1
+
+    # Status symbols
+    def _symbol(task_id: str) -> str:
+        if task_id in failed:
+            return "✗"
+        if task_id in completed:
+            return "✓"
+        if task_id == running:
+            return "●"
+        return "○"
+
+    def _color(task_id: str) -> str:
+        if task_id in failed:
+            return "red"
+        if task_id in completed:
+            return "green"
+        if task_id == running:
+            return "yellow"
+        return "dim"
+
+    lines: list[str] = []
+    lines.append("")
+
+    # Render level by level
+    for level_idx, level_tasks in enumerate(levels):
+        # Node boxes
+        box_lines: list[list[str]] = []
+        for task in level_tasks:
+            sym = _symbol(task.id)
+            desc = task.description[:22]
+            if len(task.description) > 22:
+                desc += "…"
+            box_lines.append([
+                f"┌─ {task.id} ─{'─' * max(0, 18 - len(task.id))}┐",
+                f"│ {sym} {desc:<20} │",
+                f"└{'─' * (len(task.id) + 20)}┘",
+            ])
+
+        # Interleave boxes horizontally
+        max_height = 3
+        for row_idx in range(max_height):
+            parts: list[str] = []
+            for bl in box_lines:
+                parts.append(bl[row_idx])
+            lines.append("  ".join(parts))
+
+        # Draw arrows to next level
+        if level_idx < len(levels) - 1:
+            next_tasks = levels[level_idx + 1]
+            arrow_parts: list[str] = []
+            for _ in level_tasks:
+                arrow_parts.append("        │")
+            lines.append("  ".join(arrow_parts))
+
+            # Show branching
+            has_branch = any(
+                len([c for c in children.get(t.id, []) if c in {nt.id for nt in next_tasks}]) > 1
+                for t in level_tasks
+            )
+            if has_branch:
+                merge_parts: list[str] = []
+                for i, t in enumerate(level_tasks):
+                    child_count = len(
+                        [c for c in children.get(t.id, []) if c in {nt.id for nt in next_tasks}]
+                    )
+                    if child_count > 1:
+                        merge_parts.append("    ┌───┴───┐")
+                    else:
+                        merge_parts.append("        │")
+                lines.append("  ".join(merge_parts))
+
+            # Down arrows
+            down_parts: list[str] = []
+            for _ in level_tasks:
+                down_parts.append("        ▼")
+            lines.append("  ".join(down_parts))
+
+    lines.append("")
+
+    # Legend
+    lines.append("  ○ pending  ● running  ✓ done  ✗ failed")
+    lines.append("")
+
+    return "\n".join(lines)

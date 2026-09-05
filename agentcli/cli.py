@@ -20,6 +20,7 @@ from .chat import run_chat
 from .config import APP_NAME, get_settings
 from .context import get_context_bridge, get_shared_context
 from .executor import create_executor
+from .graph import render_dag_ascii
 from .model_router import ModelRouter, create_model_router
 from .planner import Planner
 from .schemas import Run, RunStatus, TaskGraph, TaskResult, TaskStatus
@@ -29,7 +30,7 @@ app = typer.Typer(
     name="agentcli",
     help="Multi-agent development CLI powered by free-tier LLMs.",
     add_completion=False,
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 console = Console()
 
@@ -70,6 +71,27 @@ def setup_signal_handlers() -> None:
 # ── helper: check provider availability ─────────────────────────────────────
 
 
+def _launch_dashboard(run_id: str | None = None) -> None:
+    """Open the full-screen TUI dashboard.
+
+    Requires an interactive terminal; falls back to the help text when
+    stdout is not a TTY (e.g. piped output or non-interactive shells).
+    """
+    if not sys.stdout.isatty():
+        console.print(
+            "[yellow]The dashboard requires an interactive terminal.[/yellow]\n"
+            "Run [bold]agentcli --help[/bold] to see the available commands."
+        )
+        raise typer.Exit(0)
+
+    from .tui import run_dashboard
+
+    try:
+        run_dashboard(run_id=run_id)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Dashboard closed.[/dim]")
+
+
 def _check_providers() -> None:
     """Fail fast with a clear message when no LLM provider is configured."""
     from .config import settings as s
@@ -100,7 +122,23 @@ def _check_providers() -> None:
 # ── core run logic ──────────────────────────────────────────────────────────
 
 
-async def run_task(task_description: str) -> Run:
+async def run_task(
+    task_description: str,
+    *,
+    review: bool = False,
+    stream: bool = True,
+) -> Run:
+    """Run a task through the multi-agent pipeline.
+
+    Parameters
+    ----------
+    task_description:
+        Natural language task to execute.
+    review:
+        If True, show the plan and prompt for approval before executing.
+    stream:
+        If True, print task outputs live as they complete.
+    """
     run = Run(
         user_id=get_settings().default_user_id,
         task_description=task_description,
@@ -135,9 +173,76 @@ async def run_task(task_description: str) -> Run:
         run.status = RunStatus.RUNNING
         storage.save_run(run)
 
-        console.print(f"[bold green]Plan created:[/bold green] {len(graph.tasks)} tasks")
+        # ── Plan review step ────────────────────────────────────────
+        console.print(
+            f"[bold green]Plan created:[/bold green] {len(graph.tasks)} tasks"
+        )
         _print_task_graph(graph)
+        console.print()
+        console.print(render_dag_ascii(graph))
 
+        if review:
+            console.print(
+                "[bold cyan]Review the plan above.[/bold cyan]"
+            )
+            try:
+                choice = (
+                    console.input(
+                        "  [bold]Proceed?[/bold] [green]y[/green]=yes "
+                        "[red]N[/red]=no [yellow]e[/yellow]=edit: "
+                    )
+                    .strip()
+                    .lower()
+                )
+            except (EOFError, KeyboardInterrupt):
+                choice = "n"
+
+            if choice == "n" or choice == "":
+                console.print("[yellow]Plan rejected. Run cancelled.[/yellow]")
+                run.status = RunStatus.INTERRUPTED
+                run.error = "Plan rejected by user"
+                run.completed_at = datetime.utcnow()
+                storage.save_run(run)
+                raise typer.Exit(0)
+            elif choice == "e":
+                console.print(
+                    "[dim]Edit mode: modify the task descriptions below.[/dim]"
+                )
+                console.print(
+                    "[dim]Type task ID followed by new description, "
+                    "or 'done' to finish.[/dim]"
+                )
+                while True:
+                    try:
+                        edit_input = console.input("  [cyan]edit>[/cyan] ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    if edit_input.lower() in ("done", "d", ""):
+                        break
+                    parts = edit_input.split(None, 1)
+                    if len(parts) == 2:
+                        tid, new_desc = parts
+                        task = graph.get_task(tid)
+                        if task:
+                            task.description = new_desc
+                            console.print(
+                                f"  [green]Updated {tid}: {new_desc}[/green]"
+                            )
+                        else:
+                            console.print(f"  [red]Unknown task ID: {tid}[/red]")
+                    else:
+                        console.print(
+                            "  [dim]Format: <task-id> <new description>[/dim]"
+                        )
+                # Reprint updated plan
+                console.print()
+                _print_task_graph(graph)
+                console.print(render_dag_ascii(graph))
+                console.print("\n[green]Plan updated. Proceeding...[/green]\n")
+        else:
+            console.print()
+
+        # ── Execute with live streaming ─────────────────────────────
         async with create_executor(router, run.run_id) as executor:
             with Progress(
                 SpinnerColumn(),
@@ -152,6 +257,9 @@ async def run_task(task_description: str) -> Run:
                     for t in graph.tasks
                 }
 
+                # Track which outputs we've already streamed
+                streamed: set[str] = set()
+
                 async def progress_callback() -> None:
                     while True:
                         await asyncio.sleep(0.5)
@@ -163,9 +271,18 @@ async def run_task(task_description: str) -> Run:
                             elif result.status == TaskStatus.SUCCESS:
                                 desc = f"[green][{tid}] done[/green]"
                                 progress.update(task_map[tid], description=desc)
+                                # Stream output live
+                                if stream and tid not in streamed and result.output:
+                                    streamed.add(tid)
+                                    _stream_task_output(tid, result)
                             elif result.status == TaskStatus.FAILED:
                                 desc = f"[red][{tid}] failed[/red]"
                                 progress.update(task_map[tid], description=desc)
+                                if stream and tid not in streamed and result.error:
+                                    streamed.add(tid)
+                                    console.print(
+                                        f"  [red][{tid}] ERROR: {result.error[:200]}[/red]"
+                                    )
                             elif result.status == TaskStatus.SKIPPED:
                                 desc = f"[yellow][{tid}] skipped[/yellow]"
                                 progress.update(task_map[tid], description=desc)
@@ -201,6 +318,34 @@ async def run_task(task_description: str) -> Run:
             storage.save_task_result(run.run_id, result, task.description, task.depends_on)
 
     return run
+
+
+def _stream_task_output(task_id: str, result: TaskResult) -> None:
+    """Print a task's output live as it completes."""
+    if not result.output:
+        return
+    output = result.output
+    # Truncate very long outputs for readability
+    lines = output.split("\n")
+    if len(lines) > 20:
+        preview = "\n".join(lines[:20])
+        console.print(
+            Panel(
+                f"{preview}\n[dim]... ({len(lines) - 20} more lines)[/dim]",
+                title=f"{task_id} output",
+                border_style="green",
+                padding=(0, 1),
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                output,
+                title=f"{task_id} output",
+                border_style="green",
+                padding=(0, 1),
+            )
+        )
 
 
 async def _aggregate_results(
@@ -278,6 +423,7 @@ def _print_task_graph(graph: TaskGraph) -> None:
 
 @app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Annotated[
         bool, typer.Option(
             "--version", "-v", callback=_version_callback,
@@ -285,13 +431,23 @@ def main(
         )
     ] = False,
 ) -> None:
-    """Multi-agent development CLI powered by free-tier LLMs."""
+    """Multi-agent development CLI powered by free-tier LLMs.
+
+    Running [bold]agentcli[/bold] with no command launches the full-screen
+    TUI dashboard. Use [bold]agentcli <command>[/bold] for direct access
+    to any individual feature.
+    """
+    # No subcommand given → open the TUI dashboard (everything in one screen)
+    if ctx.invoked_subcommand is None:
+        _launch_dashboard()
 
 
 @app.command()
 def run(
     task: Annotated[str, typer.Argument(help="Natural language development task")],
     output: Annotated[Path | None, typer.Option("--output", "-o", help="Save final output to a file")] = None,
+    review: Annotated[bool, typer.Option("--review", "-y", help="Review plan before executing (y/N/e)")] = False,
+    no_stream: Annotated[bool, typer.Option("--no-stream", help="Don't stream task outputs live")] = False,
     db_path: Annotated[Path | None, typer.Option("--db-path", help="Override database location")] = None,
 ) -> None:
     """Run a development task through the multi-agent pipeline."""
@@ -303,7 +459,9 @@ def run(
         storage._init_db()
 
     try:
-        run_result = asyncio.run(run_task(task))
+        run_result = asyncio.run(
+            run_task(task, review=review, stream=not no_stream)
+        )
     except GracefulExit:
         console.print("\n[yellow]Interrupted. Run marked as interrupted.[/yellow]")
         sys.exit(130)
@@ -1017,6 +1175,23 @@ def session_kill_all() -> None:
         console.print("[yellow]No sessions to kill.[/yellow]")
     else:
         console.print(f"[green]✓ Killed {count} session(s)[/green]")
+
+
+@app.command()
+def dashboard(
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run", "-r", help="Focus on a specific run ID"),
+    ] = None,
+) -> None:
+    """Launch the full-screen TUI dashboard.
+
+    Interactive dashboard covering everything the CLI offers — plan
+    generation, in-app execution with live status, run history with
+    full details, interactive chat, shared context management,
+    session management, and config/provider status — all in one screen.
+    """
+    _launch_dashboard(run_id=run_id)
 
 
 if __name__ == "__main__":
