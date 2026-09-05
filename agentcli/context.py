@@ -516,3 +516,283 @@ def get_context_bridge(db_path: Path | None = None) -> ContextBridge:
         ctx = get_shared_context(db_path=db_path)
         _context_bridge = ContextBridge(ctx)
     return _context_bridge
+
+
+# ── AgentReference (file-based, agent-native context) ─────────────────────
+
+class AgentReference:
+    """A portable, agent-native context file.
+
+    ``.agentref.json`` files are designed to be read *only* by agents —
+    not humans. They serialise a subset of a :class:`SharedContext` store
+    (keyed entries with namespace + tags + metadata) into a single compact
+    JSON file that a downstream agent can load partially, paying prompt
+    tokens only for the slices it actually needs.
+
+    Design goals
+    ~~~~~~~~~~~~~
+    1. **Credit-efficient** — an agent requests only the keys / namespaces /
+       tags it cares about; the loader returns just those values.
+    2. **Portable** — a single JSON file that can be passed between runs,
+       agents, or development stages.
+    3. **Self-describing** — the file carries its own schema version, origin
+       run id, and creation timestamp so agents can decide whether it is
+       still relevant.
+    4. **Drop-in** — loaded entries are written back into a :class:`SharedContext`
+       so the existing :class:`ContextBridge` / executor machinery works
+       unchanged.
+
+    File layout (example)
+    ~~~~~~~~~~~~~~~~~~~~~~
+
+    .. code-block:: json
+
+        {
+          "$schema": "agentref://v1",
+          "origin_run_id": "a1b2c3d4e5f6",
+          "created_at": 1762000000.0,
+          "namespaces": {
+            "run:abc123": {
+              "task:t1:output": {
+                "value": "...",
+                "source_agent": "agent-1",
+                "tags": ["task_output", "task:t1"],
+                "metadata": {}
+              }
+            }
+          }
+        }
+    """
+
+    SCHEMA_VERSION = "agentref://v1"
+
+    def __init__(
+        self,
+        origin_run_id: str | None = None,
+        created_at: float | None = None,
+        namespaces: dict[str, dict[str, dict[str, Any]]] | None = None,
+    ) -> None:
+        self.origin_run_id = origin_run_id or ""
+        self.created_at = created_at if created_at is not None else time.time()
+        self.namespaces = namespaces or {}
+
+    # ── dict-like helpers ────────────────────────────────────────────────
+
+    def entries(self) -> list[tuple[str, str, ContextEntry]]:
+        """Yield ``(namespace, key, ContextEntry)`` triples."""
+        for ns, keys in self.namespaces.items():
+            for key, payload in keys.items():
+                yield ns, key, ContextEntry(
+                    key=key,
+                    value=payload["value"],
+                    namespace=ns,
+                    source_agent=payload.get("source_agent"),
+                    source_task_id=payload.get("source_task_id"),
+                    tags=payload.get("tags", []),
+                    created_at=payload.get("created_at", self.created_at),
+                    expires_at=payload.get("expires_at"),
+                    metadata=payload.get("metadata", {}),
+                )
+
+    def keys_for_namespace(self, namespace: str) -> list[str]:
+        """Return all keys stored under *namespace*."""
+        return list(self.namespaces.get(namespace, {}).keys())
+
+    def namespaces_list(self) -> list[str]:
+        """Return all namespace identifiers present in this reference."""
+        return list(self.namespaces.keys())
+
+    # ── serialisation ────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to the on-disk JSON shape."""
+        return {
+            "$schema": self.SCHEMA_VERSION,
+            "origin_run_id": self.origin_run_id,
+            "created_at": self.created_at,
+            "namespaces": self.namespaces,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        """Return the JSON text."""
+        return json.dumps(self.to_dict(), indent=indent, default=str)
+
+    def save(self, path: Path | str) -> Path:
+        """Write the reference to *path* (``.agentref.json`` conventionally)."""
+        p = Path(path)
+        p.write_text(self.to_json(), encoding="utf-8")
+        return p
+
+    @classmethod
+    def from_json(cls, text: str) -> AgentReference:
+        """Load from a JSON string."""
+        data = json.loads(text)
+        return cls(
+            origin_run_id=data.get("origin_run_id", ""),
+            created_at=data.get("created_at", time.time()),
+            namespaces=data.get("namespaces", {}),
+        )
+
+    @classmethod
+    def load(cls, path: Path | str) -> AgentReference:
+        """Load a reference from *path*."""
+        return cls.from_json(Path(path).read_text(encoding="utf-8"))
+
+    @classmethod
+    def from_context(
+        cls,
+        context: SharedContext,
+        *,
+        namespace: str | None = None,
+        tags: list[str] | None = None,
+        origin_run_id: str | None = None,
+    ) -> AgentReference:
+        """Build a reference from an existing :class:`SharedContext`.
+
+        Parameters
+        ----------
+        context:
+            The source context store.
+        namespace:
+            If given, only entries from this namespace are included.
+        tags:
+            If given, only entries carrying *any* of these tags are
+            included.
+        origin_run_id:
+            Optional run id to embed in the file metadata.
+        """
+        ref = cls(origin_run_id=origin_run_id)
+        for entry in context.read_all(namespace=namespace, tags=tags, limit=10_000):
+            ns = entry.namespace
+            ref.namespaces.setdefault(ns, {})[entry.key] = {
+                "value": entry.value,
+                "source_agent": entry.source_agent,
+                "source_task_id": entry.source_task_id,
+                "tags": entry.tags,
+                "created_at": entry.created_at,
+                "expires_at": entry.expires_at,
+                "metadata": entry.metadata,
+            }
+        return ref
+
+    def load_into(self, context: SharedContext) -> int:
+        """Write every entry in this reference into *context*.
+
+        Returns the number of entries written.
+        """
+        count = 0
+        for ns, key, entry in self.entries():
+            context.write(
+                key=entry.key,
+                value=entry.value,
+                namespace=entry.namespace,
+                source_agent=entry.source_agent,
+                source_task_id=entry.source_task_id,
+                tags=entry.tags,
+                ttl=(entry.expires_at - time.time()) if entry.expires_at else None,
+                **entry.metadata,
+            )
+            count += 1
+        return count
+
+    def to_context_entries(self) -> list[ContextEntry]:
+        """Return every entry as a list of :class:`ContextEntry`."""
+        return [entry for _, _, entry in self.entries()]
+
+    def slice(
+        self,
+        *,
+        namespaces: list[str] | None = None,
+        keys: list[str] | None = None,
+        key_prefix: str | None = None,
+        tags: list[str] | None = None,
+    ) -> AgentReference:
+        """Return a new reference containing only the selected entries.
+
+        This is the credit-saving primitive: an agent calls ``slice`` with
+        exactly the keys / namespaces / tags it needs and only those values
+        end up in the prompt.
+
+        At least one filter should be supplied; when none is, the full
+        reference is returned (same as ``self`` but as a new object).
+        """
+        filtered: dict[str, dict[str, dict[str, Any]]] = {}
+        for ns, ns_keys in self.namespaces.items():
+            if namespaces is not None and ns not in namespaces:
+                continue
+            for key, payload in ns_keys.items():
+                if keys is not None and key not in keys:
+                    continue
+                if key_prefix is not None and not key.startswith(key_prefix):
+                    continue
+                if tags is not None:
+                    entry_tags = payload.get("tags", [])
+                    if not any(t in entry_tags for t in tags):
+                        continue
+                filtered.setdefault(ns, {})[key] = payload
+        return AgentReference(
+            origin_run_id=self.origin_run_id,
+            created_at=self.created_at,
+            namespaces=filtered,
+        )
+
+    def summary(self) -> dict[str, Any]:
+        """Human-readable stats about the reference."""
+        total_entries = sum(len(keys) for keys in self.namespaces.values())
+        total_chars = sum(
+            len(p["value"]) for keys in self.namespaces.values() for p in keys.values()
+        )
+        return {
+            "schema": self.SCHEMA_VERSION,
+            "origin_run_id": self.origin_run_id or None,
+            "created_at": self.created_at,
+            "namespaces": self.namespaces_list(),
+            "total_entries": total_entries,
+            "total_payload_chars": total_chars,
+        }
+
+
+def export_reference(
+    context: SharedContext | None = None,
+    *,
+    namespace: str | None = None,
+    tags: list[str] | None = None,
+    origin_run_id: str | None = None,
+    output_path: Path | str | None = None,
+) -> AgentReference:
+    """Convenience: build + optionally save an :class:`AgentReference`.
+
+    Parameters
+    ----------
+    context:
+        Source context (defaults to the singleton).
+    namespace:
+        Restrict to one namespace.
+    tags:
+        Restrict to entries carrying any of these tags.
+    origin_run_id:
+        Embed in the file metadata.
+    output_path:
+        If given, save to disk and return the path.
+    """
+    ctx = context or get_shared_context()
+    ref = AgentReference.from_context(
+        ctx, namespace=namespace, tags=tags, origin_run_id=origin_run_id
+    )
+    if output_path:
+        ref.save(output_path)
+        return ref
+    return ref
+
+
+def import_reference(
+    path: Path | str,
+    context: SharedContext | None = None,
+) -> int:
+    """Load a ``.agentref.json`` file into the shared context.
+
+    Returns the number of entries imported.
+    """
+    ref = AgentReference.load(path)
+    ctx = context or get_shared_context()
+    return ref.load_into(ctx)

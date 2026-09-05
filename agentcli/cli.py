@@ -18,7 +18,13 @@ from rich.text import Text
 from ._version import __version__
 from .chat import run_chat
 from .config import APP_NAME, get_settings
-from .context import get_context_bridge, get_shared_context
+from .context import (
+    AgentReference,
+    export_reference,
+    import_reference,
+    get_context_bridge,
+    get_shared_context,
+)
 from .executor import create_executor
 from .graph import render_dag_ascii
 from .model_router import ModelRouter, create_model_router
@@ -982,6 +988,168 @@ def context_cmd(
 
     else:
         console.print(f"[red]Unknown action: {action}. Use ls|get|set|clear|search|stats[/red]")
+        raise typer.Exit(1)
+
+
+# ── reference (agent-native context files) commands ────────────────────────
+
+
+@app.command("ref")
+def ref_cmd(
+    action: Annotated[
+        str,
+        typer.Argument(
+            help="Action: 'create', 'show', 'slice', 'import', 'stats'"
+        ),
+    ] = "stats",
+    source: Annotated[
+        Path | None,
+        typer.Option("--source", "-s", help="Source .agentref.json file path"),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Output file path for 'create' / 'slice'"),
+    ] = None,
+    namespace: Annotated[
+        str | None,
+        typer.Option("--namespace", "-n", help="Namespace filter"),
+    ] = None,
+    tags: Annotated[
+        str | None,
+        typer.Option("--tags", help="Comma-separated tag filter (e.g. 'task_output,architecture')"),
+    ] = None,
+    key_prefix: Annotated[
+        str | None,
+        typer.Option("--key-prefix", help="Only include keys starting with this prefix"),
+    ] = None,
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run-id", "-r", help="Origin run ID (for 'create')"),
+    ] = None,
+) -> None:
+    """Manage ``.agentref.json`` files — portable, agent-native context.
+
+    These files are designed to be read *only* by agents. They carry
+    namespaced key-value context in a compact JSON format that an agent
+    can load partially (by namespace / key prefix / tags) so it pays
+    prompt tokens — and credits — only for the slices it actually needs.
+    """
+    tag_list: list[str] | None = None
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    if action == "create":
+        ctx = get_shared_context()
+        ref = export_reference(
+            ctx,
+            namespace=namespace,
+            tags=tag_list,
+            origin_run_id=run_id,
+        )
+        if not output:
+            console.print("[yellow]--output is required for 'create'[/yellow]")
+            raise typer.Exit(1)
+        path = ref.save(output)
+        stats = ref.summary()
+        console.print(
+            Panel(
+                f"[bold]✓ Created {path}[/bold]\n\n"
+                f"  Namespaces: {stats['namespaces'] or '—'}\n"
+                f"  Entries:    {stats['total_entries']}\n"
+                f"  Payload:    {stats['total_payload_chars']:,} chars\n"
+                f"  Origin run: {stats['origin_run_id'] or '—'}",
+                title="agentref created",
+                border_style="green",
+            )
+        )
+
+    elif action == "show":
+        if not source:
+            console.print("[yellow]--source is required for 'show'[/yellow]")
+            raise typer.Exit(1)
+        ref = AgentReference.load(source)
+        stats = ref.summary()
+        console.print(
+            Panel(
+                f"[bold]Schema:[/bold]       {stats['schema']}\n"
+                f"[bold]Origin run:[/bold]    {stats['origin_run_id'] or '—'}\n"
+                f"[bold]Created:[/bold]       {datetime.fromtimestamp(stats['created_at']).isoformat()}\n"
+                f"[bold]Namespaces:[/bold]    {', '.join(stats['namespaces']) or '—'}\n"
+                f"[bold]Entries:[/bold]       {stats['total_entries']}\n"
+                f"[bold]Payload chars:[/bold] {stats['total_payload_chars']:,}",
+                title=f"agentref {source}",
+                border_style="cyan",
+            )
+        )
+        for ns in stats["namespaces"]:
+            keys = ref.keys_for_namespace(ns)
+            console.print(f"\n[cyan]{ns}[/cyan]  ({len(keys)} keys)")
+            for k in keys:
+                entry = ref.namespaces[ns][k]
+                preview = entry["value"][:80].replace("\n", " \\n") + ("…" if len(entry["value"]) > 80 else "")
+                console.print(f"    [green]{k}[/green]  {preview}")
+
+    elif action == "slice":
+        if not source:
+            console.print("[yellow]--source is required for 'slice'[/yellow]")
+            raise typer.Exit(1)
+        if not output:
+            console.print("[yellow]--output is required for 'slice'[/yellow]")
+            raise typer.Exit(1)
+        ref = AgentReference.load(source)
+        sliced = ref.slice(
+            namespaces=namespace.split(",") if namespace else None,
+            key_prefix=key_prefix,
+            tags=tag_list,
+        )
+        sliced.save(output)
+        stats = sliced.summary()
+        console.print(
+            Panel(
+                f"[bold]✓ Slice saved to {output}[/bold]\n\n"
+                f"  Original entries: {ref.summary()['total_entries']}\n"
+                f"  Slice entries:    {stats['total_entries']}\n"
+                f"  Payload chars:    {stats['total_payload_chars']:,}",
+                title="agentref sliced",
+                border_style="green",
+            )
+        )
+
+    elif action == "import":
+        if not source:
+            console.print("[yellow]--source is required for 'import'[/yellow]")
+            raise typer.Exit(1)
+        ctx = get_shared_context()
+        count = import_reference(source, ctx)
+        console.print(
+            Panel(
+                f"[bold]✓ Imported {count} entries[/bold] from {source}",
+                title="agentref imported",
+                border_style="green",
+            )
+        )
+
+    elif action == "stats":
+        if not source:
+            console.print("[yellow]--source is required for 'stats'[/yellow]")
+            raise typer.Exit(1)
+        ref = AgentReference.load(source)
+        stats = ref.summary()
+        table = Table(title="agentref stats")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Schema", stats["schema"])
+        table.add_row("Origin run", stats["origin_run_id"] or "—")
+        table.add_row("Created", datetime.fromtimestamp(stats["created_at"]).isoformat())
+        table.add_row("Namespaces", ", ".join(stats["namespaces"]) or "—")
+        table.add_row("Total entries", str(stats["total_entries"]))
+        table.add_row("Payload (chars)", f"{stats['total_payload_chars']:,}")
+        console.print(table)
+
+    else:
+        console.print(
+            "[red]Unknown action. Use create|show|slice|import|stats[/red]"
+        )
         raise typer.Exit(1)
 
 
