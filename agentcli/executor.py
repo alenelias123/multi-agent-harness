@@ -247,6 +247,107 @@ def compute_task_priority(graph: TaskGraph) -> dict[str, float]:
     return priorities
 
 
+def evaluate_task_execution_quality(
+    task: Task,
+    graph: TaskGraph,
+    result: TaskResult | None = None,
+) -> tuple[float, list[str], list[str]]:
+    """Score how executable a task is and return evidence for the planner."""
+    flags: list[str] = []
+    evidence: list[str] = []
+    desc_words = task.description.split()
+
+    if len(desc_words) <= 2:
+        flags.append("too_granular_or_underspecified")
+        evidence.append("description is too short to guide execution")
+    if len(desc_words) > 35:
+        flags.append("too_vague_or_broad")
+        evidence.append("description is long enough to likely combine concerns")
+    if not task.expected_outputs:
+        flags.append("missing_expected_outputs")
+        evidence.append("executor has no concrete artifact target")
+    if not task.validation_criteria:
+        flags.append("missing_validation_criteria")
+        evidence.append("executor has no task-specific success check")
+    if len(task.depends_on) > 3:
+        flags.append("too_dependent")
+        evidence.append(f"task depends on {len(task.depends_on)} upstream tasks")
+    if task.depends_on and len(task.expected_inputs) > len(task.depends_on) * 2:
+        flags.append("artifact_gate_too_strict")
+        evidence.append("expected_inputs may block readiness on fragile text matching")
+
+    dependent_count = sum(1 for other in graph.tasks if task.id in other.depends_on)
+    if len(task.depends_on) + dependent_count > 5:
+        flags.append("dependency_hub")
+        evidence.append("task is both highly connected and failure-sensitive")
+
+    if result is not None:
+        if result.status == TaskStatus.FAILED:
+            flags.append("execution_failed")
+            evidence.append(result.error or "task failed without a recorded error")
+        elif result.status == TaskStatus.SKIPPED:
+            flags.append("execution_skipped")
+            evidence.append(result.error or "task was skipped")
+        if result.attempts > 1:
+            flags.append("required_retries")
+            evidence.append(f"task required {result.attempts} attempts")
+        if result.output and task.expected_outputs:
+            missing = [
+                expected
+                for expected in task.expected_outputs
+                if expected.lower() not in result.output.lower()
+            ]
+            if missing:
+                flags.append("expected_outputs_not_evident")
+                evidence.append(
+                    "output did not clearly mention expected artifact(s): "
+                    + ", ".join(missing[:3])
+                )
+
+    score = 1.0
+    penalties = {
+        "too_granular_or_underspecified": 0.25,
+        "too_vague_or_broad": 0.20,
+        "missing_expected_outputs": 0.20,
+        "missing_validation_criteria": 0.20,
+        "too_dependent": 0.20,
+        "artifact_gate_too_strict": 0.15,
+        "dependency_hub": 0.10,
+        "execution_failed": 0.35,
+        "execution_skipped": 0.25,
+        "required_retries": 0.10,
+        "expected_outputs_not_evident": 0.20,
+    }
+    for flag in dict.fromkeys(flags):
+        score -= penalties.get(flag, 0.0)
+    return round(max(score, 0.0), 3), list(dict.fromkeys(flags)), evidence
+
+
+def build_execution_evidence(
+    graph: TaskGraph,
+    results: dict[str, TaskResult],
+) -> str:
+    """Render execution evidence for final synthesis and debugging."""
+    lines = [
+        "Execution evidence:",
+        f"- Objective: {graph.objective or 'not recorded'}",
+        f"- Planned tasks: {len(graph.tasks)}",
+    ]
+    for task in graph.tasks:
+        result = results.get(task.id)
+        if result is None:
+            lines.append(f"- {task.id}: not run | {task.description}")
+            continue
+        flags = ", ".join(result.quality_flags) or "none"
+        evidence = "; ".join(result.evidence) or "no additional evidence"
+        lines.append(
+            f"- {task.id}: {result.status.value}, attempts={result.attempts}, "
+            f"quality={result.quality_score if result.quality_score is not None else '?'} "
+            f"| flags={flags} | evidence={evidence}"
+        )
+    return "\n".join(lines)
+
+
 # ── Execution Context ──────────────────────────────────────────────────────
 
 @dataclass
@@ -510,7 +611,12 @@ class DAGExecutor:
         self._priorities: dict[str, float] = {}
         self._approval_pending: set[str] = set()
 
+    @property
+    def graph(self) -> TaskGraph | None:
+        return self._graph
+
     async def execute(self, graph: TaskGraph) -> dict[str, TaskResult]:
+        graph = await self._revise_graph_if_needed(graph)
         self._graph = graph
         self._priorities = compute_task_priority(graph)
 
@@ -559,6 +665,7 @@ class DAGExecutor:
             for done_task in done:
                 task_id = next(k for k, v in running_tasks.items() if v is done_task)
                 result = await done_task
+                self._annotate_result_quality(graph, result)
                 self.results[task_id] = result
                 del running_tasks[task_id]
 
@@ -574,6 +681,55 @@ class DAGExecutor:
 
         self._mark_remaining_skipped(pending_tasks)
         return self.results
+
+    async def _revise_graph_if_needed(self, graph: TaskGraph) -> TaskGraph:
+        objective = graph.objective
+        if not objective:
+            return graph
+
+        feedback = self._collect_pre_execution_feedback(graph)
+        if not feedback:
+            return graph
+
+        try:
+            from .planner import Planner
+
+            revised = await Planner(self.router).revise_from_execution_feedback(
+                objective, graph, feedback
+            )
+            logger.info(
+                "Executor feedback revised plan: %s -> %s tasks",
+                len(graph.tasks),
+                len(revised.tasks),
+            )
+            return revised
+        except Exception as e:
+            logger.warning(
+                "Executor feedback revision failed; executing original graph: %s",
+                e,
+            )
+            return graph
+
+    def _collect_pre_execution_feedback(self, graph: TaskGraph) -> list[str]:
+        feedback: list[str] = []
+        for task in graph.tasks:
+            score, flags, evidence = evaluate_task_execution_quality(task, graph)
+            if score >= 0.65:
+                continue
+            feedback.append(
+                f"{task.id} scored {score:.2f} ({', '.join(flags)}): "
+                f"{'; '.join(evidence)}"
+            )
+        return feedback[:8]
+
+    def _annotate_result_quality(self, graph: TaskGraph, result: TaskResult) -> None:
+        task = graph.get_task(result.task_id)
+        if not task:
+            return
+        score, flags, evidence = evaluate_task_execution_quality(task, graph, result)
+        result.quality_score = score
+        result.quality_flags = flags
+        result.evidence = evidence
 
     def _get_ready_tasks(self, pending: dict[str, Task]) -> list[Task]:
         ready: list[Task] = []
@@ -670,6 +826,8 @@ class DAGExecutor:
                     status=TaskStatus.SKIPPED,
                     error=f"Required upstream task {failed_task_id} failed",
                 )
+                if self._graph:
+                    self._annotate_result_quality(self._graph, self.results[dep_id])
                 self.skipped.add(dep_id)
                 del pending[dep_id]
 
@@ -685,6 +843,8 @@ class DAGExecutor:
                     status=TaskStatus.SKIPPED,
                     error=f"Upstream task {failed_task_id} failed",
                 )
+                if self._graph:
+                    self._annotate_result_quality(self._graph, self.results[dep_id])
                 self.skipped.add(dep_id)
                 del pending[dep_id]
 
@@ -723,6 +883,8 @@ class DAGExecutor:
                 status=TaskStatus.SKIPPED,
                 error="Execution interrupted or dependencies not met",
             )
+            if self._graph:
+                self._annotate_result_quality(self._graph, self.results[task_id])
             self.skipped.add(task_id)
 
 

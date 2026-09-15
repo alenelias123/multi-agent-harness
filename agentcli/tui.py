@@ -772,6 +772,8 @@ class Dashboard(App):
                         await asyncio.sleep(0.3)
                         self._sync_executor_state(executor)
                     results = await exec_task
+                    graph = executor.graph or graph
+                    run.task_graph = graph
                     self._sync_executor_state(executor)
 
                 # Aggregate final output
@@ -851,10 +853,12 @@ class Dashboard(App):
 
     async def _aggregate_results(self, graph: Any, results: dict[str, Any], router: Any) -> str:
         """Combine leaf task outputs into a single final deliverable."""
+        from .executor import build_execution_evidence
         from .schemas import TaskStatus
 
         leaf_tasks = graph.leaf_tasks()
         leaf_outputs = []
+        evidence = build_execution_evidence(graph, results)
 
         for task in leaf_tasks:
             result = results.get(task.id)
@@ -862,10 +866,10 @@ class Dashboard(App):
                 leaf_outputs.append(f"## {task.id}: {task.description}\n\n{result.output}")
 
         if not leaf_outputs:
-            return "No successful task outputs to aggregate."
+            return f"No successful task outputs to aggregate.\n\n{evidence}"
 
         if len(leaf_outputs) == 1:
-            return leaf_outputs[0]
+            return f"{leaf_outputs[0]}\n\n---\n\n{evidence}"
 
         combined = "\n\n---\n\n".join(leaf_outputs)
         messages = [
@@ -874,12 +878,18 @@ class Dashboard(App):
                 "content": (
                     "You are a technical editor. Combine multiple task outputs into "
                     "a single coherent, well-structured final deliverable. Remove "
-                    "redundancy, resolve conflicts, and ensure flow."
+                    "redundancy, resolve conflicts, and ensure flow. Condition the "
+                    "final synthesis on the execution evidence: call out failed, "
+                    "skipped, retried, or weakly evidenced work instead of hiding it."
                 ),
             },
             {
                 "role": "user",
-                "content": f"Combine these task outputs:\n\n{combined}",
+                "content": (
+                    f"{evidence}\n\n"
+                    "Combine these successful leaf task outputs into a final "
+                    f"deliverable:\n\n{combined}"
+                ),
             },
         ]
 

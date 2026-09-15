@@ -23,7 +23,7 @@ from .context import (
     export_reference,
     import_reference,
 )
-from .executor import create_executor
+from .executor import build_execution_evidence, create_executor
 from .graph import render_dag_ascii
 from .model_router import ModelRouter, create_model_router
 from .planner import Planner
@@ -295,6 +295,8 @@ async def run_task(
 
                 try:
                     results = await executor.execute(graph)
+                    graph = executor.graph or graph
+                    run.task_graph = graph
                 except GracefulExit:
                     run.status = RunStatus.INTERRUPTED
                     run.error = "Interrupted by user"
@@ -359,6 +361,7 @@ async def _aggregate_results(
 ) -> str:
     leaf_tasks = graph.leaf_tasks()
     leaf_outputs = []
+    evidence = build_execution_evidence(graph, results)
 
     for task in leaf_tasks:
         result = results.get(task.id)
@@ -366,10 +369,10 @@ async def _aggregate_results(
             leaf_outputs.append(f"## {task.id}: {task.description}\n\n{result.output}")
 
     if not leaf_outputs:
-        return "No successful task outputs to aggregate."
+        return f"No successful task outputs to aggregate.\n\n{evidence}"
 
     if len(leaf_outputs) == 1:
-        return leaf_outputs[0]
+        return f"{leaf_outputs[0]}\n\n---\n\n{evidence}"
 
     combined = "\n\n---\n\n".join(leaf_outputs)
 
@@ -379,12 +382,18 @@ async def _aggregate_results(
             "content": (
                 "You are a technical editor. Combine multiple task outputs into "
                 "a single coherent, well-structured final deliverable. Remove "
-                "redundancy, resolve conflicts, and ensure flow."
+                "redundancy, resolve conflicts, and ensure flow. Condition the "
+                "final synthesis on the execution evidence: call out failed, "
+                "skipped, retried, or weakly evidenced work instead of hiding it."
             ),
         },
         {
             "role": "user",
-            "content": f"Combine these task outputs:\n\n{combined}",
+            "content": (
+                f"{evidence}\n\n"
+                "Combine these successful leaf task outputs into a final "
+                f"deliverable:\n\n{combined}"
+            ),
         },
     ]
 

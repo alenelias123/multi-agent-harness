@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
 
 from agentcli.context import SharedContext
-from agentcli.executor import DAGExecutor, RetryStrategy, TaskExecutor
+from agentcli.executor import (
+    DAGExecutor,
+    RetryStrategy,
+    TaskExecutor,
+    build_execution_evidence,
+)
 from agentcli.schemas import Task, TaskGraph, TaskStatus, TaskType
 
 
@@ -281,6 +287,71 @@ class TestDAGExecutor:
             await executor.execute(graph)
 
         assert max_active <= 4
+
+    @pytest.mark.asyncio
+    async def test_executor_feedback_revises_planner_graph(self) -> None:
+        graph = TaskGraph(max_tasks=10, objective="Build a parser")
+        graph.add_task(Task(id="t1", description="Parser", task_type=TaskType.CODING))
+
+        revised = {
+            "needs_review": False,
+            "confidence": "high",
+            "concerns": "",
+            "tasks": [
+                {
+                    "id": "t1",
+                    "description": "Implement the parser module",
+                    "depends_on": [],
+                    "task_type": "coding",
+                    "complexity": "low",
+                    "expected_outputs": ["parser module"],
+                    "validation_criteria": ["parser module is produced"],
+                }
+            ],
+        }
+        router = MockModelRouter(
+            sequence=[
+                ("planner", (json.dumps(revised), "planner-model")),
+                ("t1", ("def parse():\n    return 'parser module'", "coding-model")),
+            ],
+            auto_wrap_code=True,
+        )
+
+        executor = DAGExecutor(router, "run-feedback")
+        results = await executor.execute(graph)
+
+        assert executor.graph is not None
+        assert executor.graph.get_task("t1").description == "Implement the parser module"
+        assert results["t1"].status == TaskStatus.SUCCESS
+        assert results["t1"].quality_score is not None
+        revision_prompt = router.call_history[0]["messages"][-1]["content"]
+        assert "EXECUTOR FEEDBACK" in revision_prompt
+        assert "too_granular_or_underspecified" in revision_prompt
+
+    @pytest.mark.asyncio
+    async def test_execution_evidence_includes_failures_and_quality(self) -> None:
+        graph = TaskGraph(max_tasks=10, objective="Build a parser")
+        graph.add_task(
+            Task(
+                id="t1",
+                description="Implement the parser module",
+                task_type=TaskType.CODING,
+                expected_outputs=["parser module"],
+                validation_criteria=["parser module is produced"],
+            )
+        )
+        router = MockModelRouter(fail_counts={"t1": 3})
+        executor = DAGExecutor(
+            router,
+            "run-evidence",
+            retry_strategy=RetryStrategy(max_attempts=1),
+        )
+        results = await executor.execute(graph)
+
+        evidence = build_execution_evidence(executor.graph or graph, results)
+        assert "Objective: Build a parser" in evidence
+        assert "t1: failed" in evidence
+        assert "execution_failed" in evidence
 
 
 class TestExecutorIntegration:

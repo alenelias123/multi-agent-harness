@@ -378,12 +378,69 @@ class Planner:
             continue
 
         if best is not None:
+            best.objective = task_description
             return self._finalize(best, critique_rounds)
 
         max_retries = settings.planner_max_retries + 1
         raise PlannerError(
             f"Planning failed after {max_retries} attempts: {last_error}"
         )
+
+    async def revise_from_execution_feedback(
+        self,
+        task_description: str,
+        graph: TaskGraph,
+        feedback: list[str],
+    ) -> TaskGraph:
+        """Ask the planner for one replacement graph using executor feedback.
+
+        This is intentionally a single bounded call. The executor supplies
+        concrete observations about vague contracts, oversplitting, and
+        dependency friction; the planner either returns a better full graph or
+        the caller keeps executing the original graph.
+        """
+        review = score_plan(
+            graph,
+            max_tasks=settings.max_tasks,
+            min_contract_coverage=settings.planner_min_contract_coverage,
+            min_task_score=settings.planner_min_task_score,
+            max_estimated_cost=settings.planner_max_estimated_cost,
+        )
+        task_lines = "\n".join(
+            f"  - {t.id} [{t.task_type.value}/{t.complexity.value}] "
+            f"{t.description}; depends_on={t.depends_on}; "
+            f"outputs={t.expected_outputs}; validation={t.validation_criteria}"
+            for t in graph.tasks
+        )
+        feedback_lines = "\n".join(
+            f"  {i + 1}. {item}" for i, item in enumerate(feedback)
+        )
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Revise this task graph using executor feedback from the "
+                    "pre-execution quality pass.\n\n"
+                    f"ORIGINAL TASK: {task_description}\n\n"
+                    "CURRENT GRAPH:\n"
+                    f"{task_lines or '  (empty)'}\n\n"
+                    f"CURRENT PLAN SCORE: {review.score:.2f}\n\n"
+                    "EXECUTOR FEEDBACK:\n"
+                    f"{feedback_lines or '  (none)'}\n\n"
+                    "Return a FULL replacement JSON graph, not a diff. Fix "
+                    "tasks that are too vague, too granular, or too dependent. "
+                    "Preserve useful IDs where possible, keep dependencies "
+                    "acyclic, and ensure every task has expected_outputs and "
+                    "validation_criteria. Output ONLY the JSON object."
+                ),
+            },
+        ]
+        response, _model = await self._call_planner(messages)
+        planner_json, _meta = self._parse_response(response)
+        revised = self._build_graph(planner_json, max_tasks=settings.max_tasks)
+        revised.objective = task_description
+        return self._finalize(revised, graph.review_iterations + 1)
 
     # ------------------------------------------------------------------
     # Finalization

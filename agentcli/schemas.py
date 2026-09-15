@@ -83,6 +83,7 @@ class Task(BaseModel):
 class TaskGraph(BaseModel):
     tasks: list[Task] = Field(default_factory=list)
     max_tasks: int = 20
+    objective: str | None = None
     # --- Plan review metadata ---
     quality_score: float | None = None
     review_iterations: int = 0
@@ -155,6 +156,9 @@ class TaskResult(BaseModel):
     attempts: int = 1
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    quality_score: float | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
 
 
 class RunStatus(StrEnum):
