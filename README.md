@@ -1,6 +1,20 @@
 # AgentCLI — Multi-Agent Development CLI
 
-A standalone command-line tool that decomposes natural-language development tasks into a dependency graph of subtasks and executes them in parallel using a pool of free-tier LLMs.
+A standalone command-line tool that decomposes natural-language development tasks into a
+dependency graph of subtasks and executes them in parallel using a pool of free-tier and
+pay-per-use LLMs.
+
+- **Intelligent planner** — generates a task DAG with execution contracts, then
+  self-reviews and iteratively refines its own plan (quality scoring, budget
+  enforcement, redundancy pruning, critique-driven re-planning).
+- **Resilient executor** — runs the DAG with adaptive retries (failure classification,
+  model switching, prompt adaptation), output validation, and partial failure recovery.
+- **Multi-provider routing** — OpenRouter, OpenCode, and Freebuff with automatic
+  fallback, health tracking, and exponential backoff.
+- **Shared context** — a namespaced SQLite-backed context store lets parallel tasks
+  read each other's outputs and share state.
+- **Full-screen TUI** — everything the CLI offers, bundled into one interactive
+  dashboard. Runs by default with no arguments.
 
 ## Installation
 
@@ -25,15 +39,6 @@ agentcli --version
 agentcli --help
 ```
 
-### Launch the TUI dashboard
-
-Running `agentcli` with no command opens the full-screen TUI dashboard,
-which bundles every CLI feature into one interactive screen:
-
-```bash
-agentcli            # open the dashboard (plan, run, history, chat, ...)
-```
-
 ## Quick Start
 
 ```bash
@@ -43,248 +48,275 @@ agentcli config init
 # 2. Install and configure Freebuff (one command!)
 agentcli setup
 
-# 3. Run a task
-agentcli run "Create a FastAPI REST API for a todo app with CRUD operations"
+# 3. Launch the TUI dashboard (default when no command is given)
+agentcli
 
-# 4. Save output to a file
-agentcli run "Write a Python fizzbuzz" -o fizzbuzz.md
+# ...or run a task directly from the CLI
+agentcli run "Create a FastAPI REST API for a todo app with CRUD operations"
 ```
 
 ## Usage
 
+### Launch the TUI dashboard
+
+Running `agentcli` with no command opens the full-screen dashboard, which bundles
+every CLI feature into one interactive screen:
+
+```bash
+agentcli            # open the dashboard
+agentcli dashboard --run <run_id>   # focus on a specific run
+```
+
+Tabs: **Plan** (generate, edit, approve & run), **Logs** (live task output),
+**History** (past runs with full detail), **Chat**, **Context**, **Sessions**, and
+**Config**. Key bindings: `q` quit, `r` refresh, `e` edit mode, `a` add task,
+`x` delete task.
+
 ### Run a task
 
 ```bash
-agentcli run "Create a FastAPI REST API for a todo app with CRUD operations, using SQLite and SQLAlchemy"
+agentcli run "Create a FastAPI REST API for a todo app, using SQLite and SQLAlchemy"
 ```
 
-### Save output to file
+Useful options:
 
 ```bash
-agentcli run "Write a Python script that scrapes Hacker News" -o output.md
+# Review the plan before executing (y = proceed, N = cancel, e = edit tasks)
+agentcli run "Build a web scraper" --review
+
+# Save the final aggregated output to a file
+agentcli run "Write a Python fizzbuzz" -o fizzbuzz.md
+
+# Don't stream task outputs live
+agentcli run "Refactor the parser" --no-stream
+
+# Override the database location
+agentcli run "task" --db-path /tmp/custom.db
 ```
 
 ### Interactive chat
 
 ```bash
-# Start a chat session
 agentcli chat
-
-# With a specific model
 agentcli chat --model openrouter/google/gemma-4-31b-it:free
+agentcli chat --system-prompt my_prompt.txt
 ```
 
 Chat commands:
+
 | Command | Description |
 |---------|-------------|
 | `/help` | Show all commands |
 | `/clear` | Clear conversation history |
 | `/model` | Show active model |
-| `/export` | Save conversation to a file |
+| `/history` | Show message counts |
+| `/export [file]` | Save conversation to a Markdown file |
 | `/system` | Show the system prompt |
 | `/quit` | Exit |
 
-### View history
+### View history & inspect runs
 
 ```bash
-agentcli history
+agentcli history          # recent runs
 agentcli history -n 10
+agentcli show <run_id>    # task graph, per-task results, final output
 ```
 
-### Inspect a run
+### Parallel AI sessions (tmux)
+
+Run multiple chat sessions in parallel, each in its own tmux window:
 
 ```bash
-agentcli show <run_id>
+agentcli sessions create --name research --model openrouter/google/gemma-4-31b-it:free
+agentcli sessions list
+agentcli sessions attach <session_id>       # enter the session (Ctrl-B d to detach)
+agentcli sessions send <session_id> -m "explain the plan"
+agentcli sessions logs <session_id> -l 100  # peek at output without attaching
+agentcli sessions kill <session_id>
+agentcli sessions kill-all
 ```
+
+Requires `tmux` (`sudo apt install tmux` / `brew install tmux`).
 
 ### Context sharing
 
-Share state and task outputs across multiple agents:
+Tasks automatically store their outputs in a namespaced context store so downstream
+and parallel tasks can read them. You can manage it directly:
 
 ```bash
-# Show context store statistics
 agentcli context stats
-
-# List all context entries
-agentcli context ls
-
-# List entries in a specific namespace
 agentcli context ls --namespace run:abc123
-
-# Get a specific context entry
 agentcli context get --key task:t1:output --run-id abc123
-
-# Store a value in context
-agentcli context set --key "arch" --value "microservices" --run-id abc123
-
-# Search context entries
+agentcli context set --key arch --value "microservices" --run-id abc123
 agentcli context search --key "FastAPI"
-
-# Clear a namespace
 agentcli context clear --namespace run:abc123
 ```
 
-### Setup (Freebuff)
+Namespaces:
+
+| Namespace | Scope | Example |
+|-----------|-------|---------|
+| `global` | All agents, all runs | Project conventions, shared knowledge |
+| `run:{id}` | Single run | Task outputs, run-specific state |
+| `agent:{id}` | Single agent | Agent memory, preferences (optional TTL) |
+
+### Portable context files (`.agentref.json`)
+
+`.agentref.json` files are agent-native context snapshots: compact JSON, designed to
+be read **only by agents**. A downstream agent can load a *slice* (by namespace, key
+prefix, or tags) and pay prompt tokens only for what it needs.
 
 ```bash
-# Install freebuff CLI and check auth status
+# Export the current context store to .agentref.json
+agentcli ref create --run-id <run_id>
+
+# Inspect it
+agentcli ref show
+agentcli ref stats
+
+# Slice: only entries tagged 'architecture' or in namespace 'run:abc123'
+agentcli ref slice --tags architecture --output .agentref.slice.json
+
+# Import back into the context store
+agentcli ref import --source .agentref.json
+```
+
+### Setup commands
+
+```bash
+# Freebuff: install CLI + check/configure auth
 agentcli setup
+agentcli setup --auth                 # interactive auth flow
+agentcli setup --token YOUR_TOKEN     # set token directly
 
-# Install + run the interactive auth flow
-agentcli setup --auth
+# OpenCode: configure API key and tier
+agentcli opencode --api-key YOUR_KEY --tier zen   # or --tier go
 
-# Set a token directly
-agentcli setup --token YOUR_FREEBUFF_TOKEN
+# Both providers in one go
+agentcli providers --opencode-key YOUR_KEY --freebuff-auth
 ```
 
 ### Configuration
 
 ```bash
-# Show config/data paths
-agentcli config path
-
-# Create config directory and .env template
-agentcli config init
+agentcli config path   # show config/data/db/env paths
+agentcli config init   # create config dir and .env template
 ```
 
-## Configuration
-
-AgentCLI uses XDG-compliant paths for configuration and data storage:
+Paths (XDG-compliant):
 
 | Item | Path |
 |------|------|
 | Config dir | `~/.config/agentcli/` |
 | Data dir | `~/.local/share/agentcli/` |
 | Database | `~/.local/share/agentcli/agentcli.db` |
-| Env file | `~/.config/agentcli/.env` |
+| Env file | `~/.config/agentcli/.env` (or `./.env`) |
 
-### Environment Variables
+## Configuration Reference
 
-Create a `.env` file in `~/.config/agentcli/` (or in your CWD):
+Environment variables (in `./.env` or `~/.config/agentcli/.env`):
 
-```env
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-```
-
-Get a free API key at [openrouter.ai](https://openrouter.ai) (requires adding $10 credits for 1000 free requests/day, or use the 50 req/day free tier).
-
-Optional settings:
+### Providers
 
 ```env
-# Planner model (default: openrouter/free — auto-routes to best available free model)
-PLANNER_MODEL=openrouter/free
+# OpenRouter (free tier available — https://openrouter.ai/keys)
+OPENROUTER_API_KEY=sk-or-...
 
-# Max parallel tasks (default: 4)
-MAX_PARALLELISM=4
+# OpenCode (pay-per-use Zen or low-cost Go — https://opencode.ai/auth)
+OPENCODE_API_KEY=
+OPENCODE_TIER=zen                 # 'zen' (pay-per-use) or 'go' (subscription)
+# OPENCODE_BASE_URL=              # auto-selected from tier if unset
 
-# Max tasks per run (default: 20)
-MAX_TASKS=20
-
-# Task retry attempts (default: 2)
-TASK_MAX_RETRIES=2
-
-# Log level (default: INFO)
-LOG_LEVEL=DEBUG
-
-# Enable Freebuff provider (requires: npm install -g freebuff)
+# Freebuff (zero-config, via the freebuff CLI)
 FREEBUFF_ENABLED=true
-
-# Freebuff auth token (auto-detected from freebuff config if installed)
-FREEBUFF_TOKEN=your_freebuff_token_here
-
-# Auto-install freebuff if not found (default: false)
+FREEBUFF_TOKEN=                   # auto-detected from freebuff config if installed
 FREEBUFF_AUTO_INSTALL=true
-
-# Freebuff CLI timeout in seconds (default: 120)
 FREEBUFF_TIMEOUT=120
 ```
 
-### Freebuff Token Detection
+Custom OpenAI-compatible providers can be added via the `custom_providers` JSON
+setting (map of name → `{base_url, api_key, timeout, enabled, priority}`).
 
-The freebuff auth token is detected from multiple sources (in priority order):
+### Planner
 
-1. **`FREEBUFF_TOKEN` env var** — set in your shell or .env file
-2. **Freebuff config.json** — auto-detected from `~/.config/freebuff/config.json`
-3. **Freebuff CLI** — run `freebuff auth` to authenticate interactively
-
-To set up authentication:
-
-```bash
-# Option 1: Interactive auth flow
-agentcli setup --auth
-
-# Option 2: Set token directly
-agentcli setup --token your_token_here
-
-# Option 3: Manual
-export FREEBUFF_TOKEN=your_token
+```env
+PLANNER_MODEL=openrouter/free         # model used for planning
+PLANNER_MAX_RETRIES=2
+PLANNER_REVIEW_ENABLED=true           # master switch for heuristic plan review
+PLANNER_MIN_TASK_SCORE=0.55           # tasks below this score trigger re-planning
+PLANNER_MIN_CONTRACT_COVERAGE=0.6     # fraction of tasks that must declare contracts
+PLANNER_MAX_ESTIMATED_COST=40.0       # complexity-weight budget (low=1, med=2, high=4)
 ```
 
-### CLI Options
+### Execution
 
-Override the database location on any command:
-
-```bash
-agentcli run "task" --db-path /tmp/custom.db
-agentcli history --db-path /tmp/custom.db
+```env
+MAX_TASKS=20              # max tasks per plan
+MAX_PARALLELISM=4         # max concurrent task executions
+TASK_MAX_RETRIES=2        # max attempts per task
+LOG_LEVEL=INFO
 ```
 
-### Python Module
+## How Planning Works
 
-You can also run it as a Python module:
+The planner is a bounded self-review loop (up to 3 LLM calls per plan):
 
-```bash
-python -m agentcli --version
-python -m agentcli run "your task here"
-```
+1. **Generate** — the planner LLM outputs a strict JSON plan: tasks with
+   `depends_on`, `task_type`, `complexity`, and an *execution contract*
+   (`expected_inputs`, `expected_outputs`, `validation_criteria`).
+2. **Self-check** — local heuristics grade every task (smallness, actionability,
+   independence, testability, typing), check structural integrity (cycles, unknown
+   dependencies), budget (estimated cost), contract coverage, and near-duplicate
+   redundancy.
+3. **Local repair** — duplicates and over-budget plans are pruned without another
+   LLM call; dependencies of kept tasks are re-validated.
+4. **Critique re-plan** — if issues remain, a stricter re-plan prompt is built that
+   includes every concrete finding (plus the model's own stated concerns). The
+   best-scoring attempt wins.
 
-## Context Sharing
+Each task keeps a `quality_score` and `quality_flags`, and the graph carries
+`quality_score`, `contract_coverage`, `estimated_cost`, and `review_iterations`.
 
-The context sharing system allows multiple agents running in parallel to read and write shared context, enabling coordination and knowledge transfer between tasks.
+## How Execution Works
 
-### How It Works
+- **DAG scheduling** — tasks run as soon as all dependencies succeed, up to
+  `MAX_PARALLELISM` concurrent tasks, prioritized by critical-path length.
+- **Context injection** — every task prompt includes upstream task outputs plus
+  shared state; outputs are stored back into the context store.
+- **Execution contracts** — `expected_inputs` / `expected_outputs` /
+  `validation_criteria` are rendered into the task prompt so the model knows
+  exactly what to produce.
+- **Output validation** — task-type-specific validators (code presence, structure,
+  minimum length, criteria keywords) reject weak outputs before they propagate.
+- **Adaptive retries** — failures are classified (rate limit, timeout, network,
+  model error, invalid output, validation failed) and drive exponential-backoff
+  retries with prompt adaptation on repeat attempts.
+- **Partial failure recovery** — when a task fails, only its direct dependents are
+  skipped; parallel branches continue. Skipped tasks are recorded in the run.
 
-When tasks execute, their outputs are automatically stored in a namespaced context store. Downstream tasks can read:
+## Model Routing
 
-- **Upstream task outputs** — results from dependent tasks
-- **Shared state** — project context, architecture decisions, conventions
-- **Global context** — cross-run shared knowledge
-- **Agent memory** — per-agent state with optional TTL
+Models are configured per task type in `config.py` → `task_type_models`, using
+`provider/model` references:
 
-### Namespaces
+| Task Type | Example chain (first = preferred) |
+|-----------|-----------------------------------|
+| planning | opencode/claude-sonnet-4-5, opencode/gemini-2.5-pro, nemotron-3-ultra, gemma-4-31b, freebuff, openrouter/free |
+| coding | opencode/claude-sonnet-4-5, opencode/codex-mini, gemini-2.5-flash, gemma-4-31b, north-mini-code, freebuff, openrouter/free |
+| analysis | opencode/claude-sonnet-4-5, opencode/gemini-2.5-pro, nemotron-3-ultra, gemma-4-31b, freebuff, openrouter/free |
+| writing | opencode/gemini-2.5-flash, opencode/claude-haiku, gemma-4-31b, nemotron-3-ultra, minimax-m3, freebuff, openrouter/free |
+| general | opencode/gemini-2.5-flash, opencode/claude-haiku, nemotron-3.5-lightning, gemma-4-31b, freebuff, openrouter/free |
 
-| Namespace | Scope | Example |
-|-----------|-------|---------|
-| `global` | All agents, all runs | Project conventions, shared knowledge |
-| `run:{id}` | Single run | Task outputs, run-specific state |
-| `agent:{id}` | Single agent | Agent memory, preferences |
+On 429/5xx errors the router automatically tries the next model in the chain with
+jittered exponential backoff, tracks per-model health (3 consecutive failures ⇒
+60 s cooldown), and falls back to `openrouter/free` last.
 
-### Programmatic Usage
+### Free-tier rate limits
 
-```python
-from agentcli.context import get_shared_context, get_context_bridge
-
-# Get the shared context store
-ctx = get_shared_context()
-
-# Write context
-ctx.write(key="arch", value="microservices", namespace="global", tags=["architecture"])
-
-# Read context
-value = ctx.read(key="arch", namespace="global")
-
-# Search across context
-results = ctx.search(query="FastAPI")
-
-# Get a context bridge for task execution
-bridge = get_context_bridge()
-
-# Store task outputs
-bridge.store_task_output(run_id="run-1", task_id="t1", output="done")
-
-# Store shared state
-bridge.store_shared_state(run_id="run-1", key="project_context", value="Python + FastAPI")
-```
+OpenRouter's free tier allows **50 requests/day** (or 1000/day with $10 credits).
+A run can use up to `N × retries × models` LLM calls, where N is the number of
+tasks. Plan accordingly, or add credits at
+[openrouter.ai/settings/credits](https://openrouter.ai/settings/credits).
 
 ## Architecture
 
@@ -292,24 +324,29 @@ bridge.store_shared_state(run_id="run-1", key="project_context", value="Python +
 agentcli/
 ├── __main__.py           # python -m agentcli entrypoint
 ├── _version.py           # Single source of truth for version
-├── cli.py                # Typer CLI with run, chat, history, show, config, setup, context commands
+├── cli.py                # Typer CLI: run, chat, history, show, config, setup,
+│                         #   context, ref, sessions, opencode, providers, dashboard
+├── tui.py                # Textual full-screen dashboard (default launch mode)
 ├── chat.py               # Interactive chat REPL with Rich rendering
-├── config.py             # Settings, XDG paths, model chains, fallback config
-├── setup.py              # Freebuff install, auth, and token management
-├── context.py            # Context sharing system for multi-agent coordination
-├── planner.py            # Planning LLM call + JSON validation
-├── graph.py              # TaskGraph, DAG validation, ready-set computation
-├── executor.py           # Async DAG executor with context integration
-├── model_router.py       # Model selection, fallback, retry/backoff
+├── config.py             # Settings, XDG paths, model chains, planner tuning
+├── setup.py              # Freebuff/OpenCode install, auth, token management
+├── context.py            # SharedContext store, ContextBridge, AgentReference
+├── planner.py            # Plan generation, self-review loop, critique re-planning
+├── plan_review.py        # Heuristic scoring, pruning, budgets, critique prompts
+├── graph.py              # TaskGraph, DAG validation, ASCII rendering
+├── executor.py           # DAG executor: validation, adaptive retries, recovery
+├── model_router.py       # Provider routing, fallback, health tracking
+├── sessions.py           # tmux-backed parallel chat session manager
+├── storage.py            # SQLite persistence (runs, task results)
+├── schemas.py            # Pydantic models (Task, TaskGraph, TaskResult, Run)
 ├── providers/
 │   ├── base.py           # Abstract provider interface
 │   ├── openrouter.py     # Async OpenAI-compatible client for OpenRouter
+│   ├── opencode.py       # OpenCode Zen/Go clients
 │   └── freebuff.py       # Freebuff CLI wrapper with token detection
-├── storage.py            # SQLite persistence (runs, tasks)
-├── schemas.py            # Pydantic models (Task, TaskGraph, TaskResult, Run)
 └── prompts/
     ├── chat_system.txt     # System prompt for interactive chat
-    └── planner_system.txt  # System prompt enforcing strict JSON output
+    └── planner_system.txt  # System prompt enforcing strict JSON plan output
 
 scripts/
 └── install_freebuff.sh   # Shell script for standalone Freebuff installation
@@ -319,13 +356,19 @@ scripts/
 
 ```json
 {
+  "needs_review": false,
+  "confidence": "high",
+  "concerns": "",
   "tasks": [
     {
       "id": "t1",
       "description": "Design database schema",
       "depends_on": [],
       "task_type": "planning",
-      "complexity": "low"
+      "complexity": "low",
+      "expected_inputs": ["list of todo attributes"],
+      "expected_outputs": ["schema definition with columns and types"],
+      "validation_criteria": ["schema includes a primary key"]
     }
   ]
 }
@@ -333,40 +376,8 @@ scripts/
 
 - `task_type`: `planning` | `coding` | `analysis` | `writing` | `general`
 - `complexity`: `low` | `medium` | `high`
-
-## Model Routing
-
-Configured in `config.py` → `task_type_models` (August 2026 free models):
-
-| Task Type | Models |
-|-----------|--------|
-| planning | nemotron-3-ultra-550b, gemma-4-31b-it, freebuff, openrouter/free |
-| coding | gemma-4-31b-it, north-mini-code, nemotron-3.5-lightning, freebuff, openrouter/free |
-| analysis | nemotron-3-ultra-550b, gemma-4-31b-it, freebuff, openrouter/free |
-| writing | gemma-4-31b-it, nemotron-3-ultra-550b, minimax-m3, freebuff, openrouter/free |
-| general | nemotron-3.5-lightning, gemma-4-31b-it, stealth/ox-alpha, freebuff, openrouter/free |
-
-On 429/5xx errors, the router automatically tries the next model in the chain with exponential backoff. The `openrouter/free` meta-model always appears as the final fallback.
-
-### Free-tier rate limits
-
-OpenRouter's free tier has a **50 requests/day** limit (or 1000/day with $10 credits). The CLI uses up to `N × retries × models` LLM calls per run, where N is the number of tasks. Plan accordingly or add credits at [openrouter.ai/settings/credits](https://openrouter.ai/settings/credits).
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=agentcli
-
-# Run specific test file
-pytest tests/test_graph.py
-pytest tests/test_executor.py
-pytest tests/test_context.py
-pytest tests/test_setup.py
-```
+- The contract fields are optional but strongly encouraged — they raise task
+  quality scores and are rendered into the executor prompt.
 
 ## Example Output
 
@@ -395,12 +406,62 @@ Planning task: Create a Python CLI tool that fetches weather data from an API
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Phase 2 Roadmap (Not Implemented)
+## Development
+
+```bash
+pip install -e ".[dev]"
+
+# Run the test suite (180 tests)
+pytest
+
+# Type checking
+mypy agentcli
+
+# Linting / auto-fix
+ruff check agentcli tests
+ruff check agentcli tests --fix
+```
+
+Code style: ruff with `line-length = 100`, targeting Python 3.11+. All three
+gates (pytest, ruff, mypy) are expected to pass before committing.
+
+### Programmatic usage
+
+```python
+from agentcli.context import get_shared_context, get_context_bridge
+
+# Get the shared context store
+ctx = get_shared_context()
+
+# Write / read / search
+ctx.write(key="arch", value="microservices", namespace="global", tags=["architecture"])
+value = ctx.read(key="arch", namespace="global")
+results = ctx.search(query="FastAPI")
+
+# Context bridge used by the executor
+bridge = get_context_bridge()
+bridge.store_task_output(run_id="run-1", task_id="t1", output="done")
+bridge.store_shared_state(run_id="run-1", key="project_context", value="Python + FastAPI")
+
+# Portable agentref files
+from agentcli.context import export_reference, import_reference
+ref = export_reference(ctx, output_path=".agentref.json")   # save a snapshot
+ref.slice(tags=["architecture"]).save(".agentref.slice.json")  # partial load
+count = import_reference(".agentref.json")                  # import into the store
+```
+
+You can also run it as a Python module:
+
+```bash
+python -m agentcli --version
+python -m agentcli run "your task here"
+```
+
+## Roadmap
 
 - Multi-user authentication
 - Web API server
 - Redis/Celery task queue
-- Web UI dashboard
 - Team workspaces
 
 ## License
