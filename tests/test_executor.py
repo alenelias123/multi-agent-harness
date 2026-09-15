@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from agentcli.context import SharedContext
-from agentcli.executor import DAGExecutor, TaskExecutor
+from agentcli.executor import DAGExecutor, RetryStrategy, TaskExecutor
 from agentcli.schemas import Task, TaskGraph, TaskStatus, TaskType
 
 
@@ -168,7 +168,9 @@ class TestTaskExecutor:
     @pytest.mark.asyncio
     async def test_execute_fails_after_max_retries(self) -> None:
         router = MockModelRouter(fail_counts={"t1": 3})
-        executor = TaskExecutor(router, "run-1")
+        executor = TaskExecutor(
+            router, "run-1", retry_strategy=RetryStrategy(max_attempts=2)
+        )
         task = Task(id="t1", description="Test task", task_type=TaskType.CODING)
         result = await executor.execute_task(task, {})
         assert result.status == TaskStatus.FAILED
@@ -348,12 +350,20 @@ class TestContractHandoff:
         captured_messages: list[list[dict]] = []
 
         class ContractCapturingRouter:
+            def __init__(self) -> None:
+                self.call_count = 0
+
             async def call(
                 self, task_type: str, messages: list[dict], **_kw: object  # noqa: ARG002
             ) -> tuple[str, str]:
+                self.call_count += 1
                 captured_messages.append(messages)
-                # Return valid code output for validation
-                return ("```python\ndef parser():\n    pass\n```", "mock-model")
+                # Valid code output incl. a test for the "tests pass" criterion
+                return (
+                    "```python\ndef parser():\n    pass\n\n"
+                    "def test_parser():\n    assert parser() is not None\n```",
+                    "mock-model",
+                )
 
         graph = TaskGraph(max_tasks=10)
         graph.add_task(
@@ -417,7 +427,10 @@ class TestContextSharing:
         )
 
         router = MockModelRouter(
-            sequence=[("t1", ("hello output", "mock-model"))]
+            sequence=[
+                ("t1", ("```python\ndef hello():\n    return 'hello output'\n```", "mock-model"))
+            ],
+            auto_wrap_code=False,
         )
 
         # Use a fresh context so tests don't leak state
@@ -430,7 +443,7 @@ class TestContextSharing:
 
         # Check that the output was stored in shared context
         output = ctx.read(key="task:t1:output", namespace="run:run-ctx-1")
-        assert output == "hello output"
+        assert "hello output" in output
 
     @pytest.mark.asyncio
     async def test_shared_state_readable_by_downstream(self) -> None:

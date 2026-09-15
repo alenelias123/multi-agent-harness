@@ -400,7 +400,7 @@ class TaskExecutor:
         # Add execution contract
         contract = task.render_contract()
         if contract:
-            context = f"{context}\n\n{contract}"
+            context = f"{context}\n\nExecution contract:\n{contract}"
 
         # Adaptive prompt based on failure
         system_prompt = self._get_system_prompt(task.task_type)
@@ -607,7 +607,15 @@ class DAGExecutor:
         return False
 
     def _check_artifact_dependencies(self, task: Task) -> bool:
-        """Check if artifact dependencies are satisfied."""
+        """Check if artifact dependencies are satisfied.
+
+        Only meaningful for tasks that actually have upstream dependencies:
+        ``expected_inputs`` on a dependency-free task describe what the task
+        consumes from the *user* request, not from other tasks, so they can
+        never block readiness.
+        """
+        if not task.depends_on:
+            return True
         # Check expected_inputs against available artifacts
         for expected in task.expected_inputs:
             found = False
