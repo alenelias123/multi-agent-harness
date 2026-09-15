@@ -45,15 +45,15 @@ def _run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str
         if check and result.returncode != 0:
             raise TmuxError(f"tmux {' '.join(args)} failed: {result.stderr.strip()}")
         return result
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise TmuxError(
             "tmux is not installed. Install it:\n"
             "  Ubuntu/Debian: sudo apt install tmux\n"
             "  macOS: brew install tmux\n"
             "  Arch: sudo pacman -S tmux"
-        )
-    except subprocess.TimeoutExpired:
-        raise TmuxError(f"tmux command timed out: tmux {' '.join(args)}")
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise TmuxError(f"tmux command timed out: tmux {' '.join(args)}") from e
 
 
 def is_tmux_available() -> bool:
@@ -99,7 +99,8 @@ def _load_session_meta(session_id: str) -> dict[str, Any] | None:
     path = _session_meta_path(session_id)
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    loaded: dict[str, Any] | None = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
 
 
 def _remove_session_meta(session_id: str) -> None:

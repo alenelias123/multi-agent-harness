@@ -5,9 +5,19 @@ from unittest.mock import patch
 
 import pytest
 
-from agentcli.context import SharedContext, get_context_bridge
+from agentcli.context import SharedContext
 from agentcli.executor import DAGExecutor, TaskExecutor
 from agentcli.schemas import Task, TaskGraph, TaskStatus, TaskType
+
+
+def _make_code_output(content: str) -> str:
+    """Wrap content in a code block for validation."""
+    return f"```python\n{content}\n```"
+
+
+def _make_test_output(content: str) -> str:
+    """Wrap content with test markers for validation."""
+    return f"```python\n{content}\n\n# tests\ndef test_example():\n    assert True\n```"
 
 
 class MockModelRouter:
@@ -16,6 +26,7 @@ class MockModelRouter:
         responses: dict[str, tuple[str, str]] | None = None,
         fail_counts: dict[str, int] | None = None,
         sequence: list[tuple[str, tuple[str, str]]] | None = None,
+        auto_wrap_code: bool = True,
     ) -> None:
         self.responses = responses or {}
         self.fail_counts = fail_counts or {}
@@ -23,6 +34,28 @@ class MockModelRouter:
         self.call_counts: dict[str, int] = {}
         self.sequence_index = 0
         self.call_history: list[dict] = []
+        self.auto_wrap_code = auto_wrap_code
+
+    def _wrap_for_type(self, task_type: str, content: str) -> str:
+        """Wrap output based on task type for validation."""
+        if not self.auto_wrap_code:
+            return content
+        if task_type == "coding":
+            return _make_code_output(content)
+        if task_type == "analysis":
+            return f"## Analysis\n\n{content}\n\n### Findings\n- Finding 1\n- Finding 2"
+        if task_type == "writing":
+            return (
+                "# Documentation\n\n"
+                f"{content}\n\n"
+                "## Details\nMore detailed content here to meet minimum word count."
+            )
+        if task_type == "planning":
+            return (
+                f"## Plan\n\n1. Phase 1: {content}\n"
+                "2. Phase 2: Implementation\n3. Phase 3: Testing"
+            )
+        return content
 
     async def call(
         self, task_type: str, messages: list[dict], **kwargs: object
@@ -59,9 +92,13 @@ class MockModelRouter:
                 )
 
             if task_id in self.responses:
-                return self.responses[task_id]
+                response = self.responses[task_id]
+                wrapped = self._wrap_for_type(task_type, response[0])
+                return (wrapped, response[1])
 
-        return (f"Output for {task_id or 'unknown'}", "mock-model")
+        default = f"Output for {task_id or 'unknown'}"
+        wrapped = self._wrap_for_type(task_type, default)
+        return (wrapped, "mock-model")
 
 
 @pytest.fixture
@@ -107,7 +144,7 @@ class TestTaskExecutor:
     async def test_execute_success(
         self, mock_router: MockModelRouter
     ) -> None:
-        ctx = SharedContext()
+        ctx = SharedContext()  # noqa: F841
         executor = TaskExecutor(mock_router, "run-1", context_bridge=None)
         task = Task(id="t1", description="Test task", task_type=TaskType.CODING)
         result = await executor.execute_task(task, {})
@@ -190,7 +227,8 @@ class TestDAGExecutor:
             ) -> tuple[str, str]:
                 self.call_count += 1
                 captured_messages.append(messages)
-                return (f"Output from call {self.call_count}", "mock-model")
+                # Wrap in code block for coding task validation
+                return (f"```python\nOutput from call {self.call_count}\n```", "mock-model")
 
         router = CapturingRouter()
         executor = DAGExecutor(router, "run-1")  # type: ignore[arg-type]
@@ -277,10 +315,18 @@ class TestExecutorIntegration:
 
         router = MockModelRouter(
             sequence=[
-                ("t1", ("API Design: REST with JSON", "planner-model")),
-                ("t2", ("Models implemented", "coding-model")),
-                ("t3", ("Routes implemented", "coding-model")),
-                ("t4", ("Tests written", "coding-model")),
+                (
+                    "t1",
+                    (
+                        "1. Phase 1: Design API\n"
+                        "2. Phase 2: Implementation\n"
+                        "3. Phase 3: Testing",
+                        "planner-model",
+                    ),
+                ),
+                ("t2", ("class Model:\n    pass", "coding-model")),
+                ("t3", ("def route():\n    pass", "coding-model")),
+                ("t4", ("def test_model():\n    assert True", "coding-model")),
             ]
         )
 
@@ -292,6 +338,72 @@ class TestExecutorIntegration:
         )
         assert results["t1"].model_used == "planner-model"
         assert results["t2"].model_used == "coding-model"
+
+
+class TestContractHandoff:
+    """Verify the planner-to-executor contract reaches the task prompt."""
+
+    @pytest.mark.asyncio
+    async def test_contract_rendered_in_task_prompt(self) -> None:
+        captured_messages: list[list[dict]] = []
+
+        class ContractCapturingRouter:
+            async def call(
+                self, task_type: str, messages: list[dict], **_kw: object  # noqa: ARG002
+            ) -> tuple[str, str]:
+                captured_messages.append(messages)
+                # Return valid code output for validation
+                return ("```python\ndef parser():\n    pass\n```", "mock-model")
+
+        graph = TaskGraph(max_tasks=10)
+        graph.add_task(
+            Task(
+                id="t1",
+                description="Implement the parser",
+                task_type=TaskType.CODING,
+                expected_inputs=["token spec"],
+                expected_outputs=["parser.py"],
+                validation_criteria=["parses sample input", "tests pass"],
+            )
+        )
+
+        router = ContractCapturingRouter()
+        executor = DAGExecutor(router, "run-contract")  # type: ignore[arg-type]
+        await executor.execute(graph)
+
+        user_msg = next(
+            m for m in captured_messages[0] if m["role"] == "user"
+        )
+        assert "Execution contract:" in user_msg["content"]
+        assert "Expected inputs: token spec" in user_msg["content"]
+        assert "Required outputs: parser.py" in user_msg["content"]
+        assert "Validation criteria" in user_msg["content"]
+        assert "parses sample input" in user_msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_unchanged_without_contract(self) -> None:
+        captured_messages: list[list[dict]] = []
+
+        class BareCapturingRouter:
+            async def call(
+                self, task_type: str, messages: list[dict], **_kw: object  # noqa: ARG002
+            ) -> tuple[str, str]:
+                captured_messages.append(messages)
+                return ("done", "mock-model")
+
+        graph = TaskGraph(max_tasks=10)
+        graph.add_task(
+            Task(id="t1", description="Task 1", task_type=TaskType.CODING)
+        )
+
+        router = BareCapturingRouter()
+        executor = DAGExecutor(router, "run-bare")  # type: ignore[arg-type]
+        await executor.execute(graph)
+
+        user_msg = next(
+            m for m in captured_messages[0] if m["role"] == "user"
+        )
+        assert "Execution contract:" not in user_msg["content"]
 
 
 class TestContextSharing:
@@ -351,7 +463,7 @@ class TestContextSharing:
 
         class StateCapturingRouter:
             async def call(
-                self, task_type: str, messages: list[dict], **_kw: object
+                self, task_type: str, messages: list[dict], **_kw: object  # noqa: ARG002
             ) -> tuple[str, str]:
                 captured_messages.append(messages)
                 return ("done", "mock-model")

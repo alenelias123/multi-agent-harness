@@ -77,6 +77,28 @@ class Settings(BaseSettings):
     planner_model: str = "openrouter/free"
     planner_max_retries: int = 2
 
+    # --- Planner review / refinement ---
+    # Master switch for heuristic plan review (quality scoring, budget,
+    # contract coverage). Structural checks (cycles, unknown deps) always run.
+    planner_review_enabled: bool = Field(
+        default=True, validation_alias="PLANNER_REVIEW_ENABLED"
+    )
+    # A plan is accepted as-is when every task scores at or above this
+    # threshold (0..1). Weaker plans trigger one critique re-plan round.
+    planner_min_task_score: float = Field(
+        default=0.55, validation_alias="PLANNER_MIN_TASK_SCORE"
+    )
+    # Fraction of tasks that must declare expected_outputs /
+    # validation_criteria for a plan to pass review without re-planning.
+    planner_min_contract_coverage: float = Field(
+        default=0.6, validation_alias="PLANNER_MIN_CONTRACT_COVERAGE"
+    )
+    # Budget guard: sum of complexity weights (low=1, medium=2, high=4)
+    # the plan may not exceed. Encourages splitting high-complexity tasks.
+    planner_max_estimated_cost: float = Field(
+        default=40.0, validation_alias="PLANNER_MAX_ESTIMATED_COST"
+    )
+
     max_tasks: int = 20
     max_parallelism: int = 4
     task_max_retries: int = 2

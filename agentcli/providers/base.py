@@ -37,7 +37,7 @@ class BaseProvider(ABC):
     async def __aenter__(self) -> BaseProvider:
         return self
 
-    async def __aexit__(
+    async def __aexit__(  # noqa: B027
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,

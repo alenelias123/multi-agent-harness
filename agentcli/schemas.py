@@ -35,16 +35,60 @@ class Task(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     task_type: TaskType = TaskType.GENERAL
     complexity: Complexity = Complexity.MEDIUM
+    # --- Execution contract (planner-to-executor handoff) ---
+    expected_inputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    validation_criteria: list[str] = Field(default_factory=list)
+    # --- Quality review metadata (filled by plan review, not the model) ---
+    quality_score: float | None = None
+    quality_flags: list[str] = Field(default_factory=list)
 
     @field_validator("id", mode="before")
     @classmethod
     def generate_id(cls, v: str | None) -> str:
         return v or uuid4().hex[:8]
 
+    @field_validator("expected_inputs", "expected_outputs", "validation_criteria",
+                     "quality_flags", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v: object) -> list[str]:
+        """Tolerate a single string or comma-separated string from the planner."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [part.strip() for part in v.split(",") if part.strip()]
+        if isinstance(v, list):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return []
+
+    def render_contract(self) -> str:
+        """Render the execution contract as text for the executor prompt."""
+        lines: list[str] = []
+        if self.expected_inputs:
+            lines.append(
+                "Expected inputs: " + "; ".join(self.expected_inputs)
+            )
+        if self.expected_outputs:
+            lines.append(
+                "Required outputs: " + "; ".join(self.expected_outputs)
+            )
+        if self.validation_criteria:
+            lines.append(
+                "Validation criteria (output is checked against these): "
+                + "; ".join(self.validation_criteria)
+            )
+        return "\n".join(lines)
+
 
 class TaskGraph(BaseModel):
     tasks: list[Task] = Field(default_factory=list)
     max_tasks: int = 20
+    # --- Plan review metadata ---
+    quality_score: float | None = None
+    review_iterations: int = 0
+    pruned_task_ids: list[str] = Field(default_factory=list)
+    contract_coverage: float = 0.0
+    estimated_cost: float = 0.0
 
     def add_task(self, task: Task) -> None:
         if len(self.tasks) >= self.max_tasks:

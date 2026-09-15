@@ -4,8 +4,6 @@ import json
 import time
 from pathlib import Path
 
-import pytest
-
 from agentcli.context import (
     AgentReference,
     ContextEntry,
@@ -14,12 +12,15 @@ from agentcli.context import (
     import_reference,
 )
 
-
 # ── helpers ────────────────────────────────────────────────────────────────
 
 def _fill_context(ctx: SharedContext, namespace: str = "global") -> None:
-    ctx.write("feat: auth", "OAuth2 with JWT", namespace=namespace, tags=["feature", "auth"])
-    ctx.write("feat: billing", "Stripe integration", namespace=namespace, tags=["feature", "billing"])
+    ctx.write(
+        "feat: auth", "OAuth2 with JWT", namespace=namespace, tags=["feature", "auth"]
+    )
+    ctx.write(
+        "feat: billing", "Stripe integration", namespace=namespace, tags=["feature", "billing"]
+    )
     ctx.write("arch: db", "PostgreSQL 16", namespace=namespace, tags=["architecture"])
     ctx.write(
         "task:t1:output",
@@ -50,7 +51,7 @@ class TestAgentReferenceBasics:
         reconstructed = AgentReference.from_json(ref.to_json())
         assert reconstructed.origin_run_id == "run-123"
 
-    def test_to_json_and_load(self, tmp_path: Path) -> None:
+    def test_to_json_and_load(self, tmp_path: Path) -> None:  # noqa: ARG002
         ref = AgentReference(origin_run_id="run-456")
         text = ref.to_json()
         loaded = AgentReference.from_json(text)
@@ -170,7 +171,7 @@ class TestConvenienceFunctions:
         ctx = SharedContext(db_path=tmp_path / "ctx.db")
         _fill_context(ctx)
         out = tmp_path / "out.agentref.json"
-        ref = export_reference(ctx, output_path=out)
+        export_reference(ctx, output_path=out)
         assert out.exists()
         loaded = AgentReference.load(out)
         assert loaded.summary()["total_entries"] == 4

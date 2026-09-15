@@ -22,8 +22,6 @@ from .context import (
     AgentReference,
     export_reference,
     import_reference,
-    get_context_bridge,
-    get_shared_context,
 )
 from .executor import create_executor
 from .graph import render_dag_ascii
@@ -210,7 +208,7 @@ async def run_task(
                 run.completed_at = datetime.utcnow()
                 storage.save_run(run)
                 raise typer.Exit(0)
-            elif choice == "e":
+            if choice == "e":
                 console.print(
                     "[dim]Edit mode: modify the task descriptions below.[/dim]"
                 )
@@ -430,7 +428,7 @@ def _print_task_graph(graph: TaskGraph) -> None:
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    version: Annotated[
+    version: Annotated[  # noqa: ARG001 handled by its own eager callback
         bool, typer.Option(
             "--version", "-v", callback=_version_callback,
             is_eager=True, help="Show version and exit."
@@ -451,10 +449,18 @@ def main(
 @app.command()
 def run(
     task: Annotated[str, typer.Argument(help="Natural language development task")],
-    output: Annotated[Path | None, typer.Option("--output", "-o", help="Save final output to a file")] = None,
-    review: Annotated[bool, typer.Option("--review", "-y", help="Review plan before executing (y/N/e)")] = False,
-    no_stream: Annotated[bool, typer.Option("--no-stream", help="Don't stream task outputs live")] = False,
-    db_path: Annotated[Path | None, typer.Option("--db-path", help="Override database location")] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Save final output to a file")
+    ] = None,
+    review: Annotated[
+        bool, typer.Option("--review", "-y", help="Review plan before executing (y/N/e)")
+    ] = False,
+    no_stream: Annotated[
+        bool, typer.Option("--no-stream", help="Don't stream task outputs live")
+    ] = False,
+    db_path: Annotated[
+        Path | None, typer.Option("--db-path", help="Override database location")
+    ] = None,
 ) -> None:
     """Run a development task through the multi-agent pipeline."""
     _check_providers()
@@ -489,8 +495,12 @@ def run(
 
 @app.command()
 def history(
-    limit: Annotated[int, typer.Option("--limit", "-n", help="Number of runs to show")] = 20,
-    db_path: Annotated[Path | None, typer.Option("--db-path", help="Override database location")] = None,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Number of runs to show")
+    ] = 20,
+    db_path: Annotated[
+        Path | None, typer.Option("--db-path", help="Override database location")
+    ] = None,
 ) -> None:
     """Show recent runs."""
     if db_path:
@@ -532,7 +542,9 @@ def history(
 @app.command()
 def show(
     run_id: Annotated[str, typer.Argument(help="Run ID to display")],
-    db_path: Annotated[Path | None, typer.Option("--db-path", help="Override database location")] = None,
+    db_path: Annotated[
+        Path | None, typer.Option("--db-path", help="Override database location")
+    ] = None,
 ) -> None:
     """Show details of a specific run."""
     if db_path:
@@ -543,7 +555,6 @@ def show(
     if not run:
         console.print(f"[red]Run {run_id} not found.[/red]")
         raise typer.Exit(1)
-
     info = (
         f"[bold]Run ID:[/bold] {run.run_id}\n"
         f"[bold]Description:[/bold] {run.task_description}\n"
@@ -686,8 +697,8 @@ def setup(
     from .setup import (
         get_freebuff_token,
         get_freebuff_version,
-        is_freebuff_installed,
         install_freebuff,
+        is_freebuff_installed,
         run_auth_flow,
         save_token_to_env,
     )
@@ -715,7 +726,7 @@ def setup(
 
     # Step 2: Token
     if token:
-        console.print(f"[cyan]→ Saving provided token to .env...[/cyan]")
+        console.print("[cyan]→ Saving provided token to .env...[/cyan]")
         env_path = save_token_to_env(token)
         console.print(f"[green]✓ Token saved to {env_path}[/green]")
     elif auth:
@@ -768,7 +779,6 @@ def opencode(
     """
     from pathlib import Path as _P
 
-    from .config import _find_dotenv
 
     # Interactive API key prompt if not provided
     if not api_key:
@@ -787,7 +797,7 @@ def opencode(
             api_key = console.input("[bold]Enter your OpenCode API key:[/bold] ")
         except (EOFError, KeyboardInterrupt):
             console.print("\n[yellow]Setup cancelled.[/yellow]")
-            raise typer.Exit(0)
+            raise typer.Exit(0) from None
 
     api_key = api_key.strip() if api_key else ""
     if not api_key:
@@ -878,6 +888,97 @@ def opencode(
             border_style="green",
         )
     )
+
+
+@app.command()
+def providers(
+    opencode_key: Annotated[
+        str | None, typer.Option("--opencode-key", "-k", help="OpenCode API key")
+    ] = None,
+    opencode_tier: Annotated[
+        str, typer.Option("--opencode-tier", "-t", help="OpenCode tier: 'zen' or 'go'")
+    ] = "zen",
+    freebuff_auth: Annotated[
+        bool, typer.Option("--freebuff-auth", "-a", help="Run Freebuff auth flow")
+    ] = False,
+    freebuff_auto_install: Annotated[
+        bool,
+        typer.Option(
+            "--freebuff-install/--no-freebuff-install", help="Auto-install Freebuff CLI"
+        ),
+    ] = True,
+) -> None:
+    """Configure multiple LLM providers at once (OpenCode + Freebuff).
+
+    This unified command sets up both providers in one go, handling
+    their different authentication methods:
+    - OpenCode: API key stored in .env (Bearer token)
+    - Freebuff: CLI install + optional interactive auth flow
+    """
+    from .setup import setup_all
+
+    console.print(
+        Panel(
+            "[bold]Multi-Provider Setup[/bold]\n\n"
+            "Configuring available LLM providers for agentcli.",
+            title="🔧 Providers Setup",
+            border_style="cyan",
+        )
+    )
+
+    results = setup_all(
+        opencode_api_key=opencode_key,
+        opencode_tier=opencode_tier,
+        freebuff_auth=freebuff_auth,
+        freebuff_auto_install=freebuff_auto_install,
+    )
+
+    console.print()
+    all_ok = True
+
+    for provider, result in results.items():
+        if provider == "opencode":
+            if result.get("error"):
+                console.print(f"[red]✗ OpenCode: {result['error']}[/red]")
+                all_ok = False
+            else:
+                console.print(
+                    f"[green]✓ OpenCode ({result.get('version', 'zen')}) configured[/green]"
+                )
+        elif provider == "freebuff":
+            if result.get("error"):
+                console.print(f"[red]✗ Freebuff: {result['error']}[/red]")
+                all_ok = False
+            else:
+                status = []
+                if result.get("installed"):
+                    status.append(f"installed v{result.get('version', '?')}")
+                if result.get("authenticated"):
+                    status.append(f"authenticated ({result.get('token_source', '?')})")
+                else:
+                    status.append("[yellow]not authenticated[/yellow]")
+                console.print(f"[green]✓ Freebuff: {' '.join(status)}[/green]")
+
+    console.print()
+    if all_ok:
+        console.print(
+            Panel(
+                "[bold]All providers configured successfully![/bold]\n\n"
+                "Your .env should now have the necessary configuration.\n"
+                "Run [cyan]agentcli config path[/cyan] to verify.",
+                title="✓ Setup Complete",
+                border_style="green",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "[yellow]Some providers need attention.[/yellow]\n\n"
+                "Check the output above for details.",
+                title="⚠ Partial Setup",
+                border_style="yellow",
+            )
+        )
 
 
 @app.command("context")
@@ -1079,6 +1180,9 @@ def ref_cmd(
     # Determine context DB — project-local by default
     ctx_db = db_path or _project_db_path()
 
+    # Actions below all read from an existing file; source is guaranteed set.
+    assert source is not None  # narrows Optional for mypy
+
     if action == "create":
         ref = export_reference(
             namespace=namespace,
@@ -1108,7 +1212,8 @@ def ref_cmd(
             Panel(
                 f"[bold]Schema:[/bold]       {stats['schema']}\n"
                 f"[bold]Origin run:[/bold]    {stats['origin_run_id'] or '—'}\n"
-                f"[bold]Created:[/bold]       {datetime.fromtimestamp(stats['created_at']).isoformat()}\n"
+                "[bold]Created:[/bold]       "
+                f"{datetime.fromtimestamp(stats['created_at']).isoformat()}\n"
                 f"[bold]Namespaces:[/bold]    {', '.join(stats['namespaces']) or '—'}\n"
                 f"[bold]Entries:[/bold]       {stats['total_entries']}\n"
                 f"[bold]Payload chars:[/bold] {stats['total_payload_chars']:,}",
@@ -1121,7 +1226,9 @@ def ref_cmd(
             console.print(f"\n[cyan]{ns}[/cyan]  ({len(keys)} keys)")
             for k in keys:
                 entry = ref.namespaces[ns][k]
-                preview = entry["value"][:80].replace("\n", " \\n") + ("…" if len(entry["value"]) > 80 else "")
+                preview = entry["value"][:80].replace("\n", " \\n")
+                if len(entry["value"]) > 80:
+                    preview += "…"
                 console.print(f"    [green]{k}[/green]  {preview}")
 
     elif action == "slice":
@@ -1182,7 +1289,7 @@ def ref_cmd(
 
 def _get_session_manager() -> Any:
     """Lazy-import and instantiate the SessionManager."""
-    from .sessions import SessionManager, TmuxError, is_tmux_available
+    from .sessions import SessionManager, is_tmux_available
 
     if not is_tmux_available():
         console.print(
@@ -1231,7 +1338,8 @@ def session_create(
             f"  [cyan]tmux:[/cyan]   {session.tmux_window}\n\n"
             f"[dim]Quick actions:[/dim]\n"
             f"  Attach:     [green]agentcli sessions attach {session.session_id}[/green]\n"
-            f"  Send input: [green]agentcli sessions send {session.session_id} -m 'your message'[/green]\n"
+            "  Send input: [green]agentcli sessions send "
+            f"{session.session_id} -m 'your message'[/green]\n"
             f"  View logs:  [green]agentcli sessions logs {session.session_id}[/green]",
             title="🚀 New Session",
             border_style="green",
@@ -1291,7 +1399,7 @@ def session_attach(
         manager.attach_session(session_id)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @sessions_app.command("send")
@@ -1316,7 +1424,7 @@ def session_send(
         console.print(f"[green]✓ Message sent to session {session_id}[/green]")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @sessions_app.command("logs")
@@ -1338,7 +1446,7 @@ def session_logs(
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @sessions_app.command("kill")
@@ -1355,7 +1463,7 @@ def session_kill(
         console.print(f"[green]✓ Session {session_id} killed[/green]")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @sessions_app.command("kill-all")

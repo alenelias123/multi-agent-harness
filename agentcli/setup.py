@@ -1,10 +1,12 @@
-"""Setup utilities for Freebuff CLI — install, auth, and token management.
+"""Setup utilities for Freebuff CLI and OpenCode — install, auth, and token management.
 
 The freebuff CLI stores its auth token in:
   - ~/.config/manicode/credentials.json (actual location, under 'authToken')
   - ~/.config/freebuff/config.json       (legacy fallback)
 
-This module detects and manages that token, bridging it into agentcli's
+OpenCode uses API key authentication via Bearer token in .env.
+
+This module detects and manages tokens, bridging them into agentcli's
 .env-based configuration.
 """
 
@@ -38,13 +40,12 @@ def _freebuff_config_dir() -> Path:
     home = Path.home()
     if sys.platform == "darwin":
         return home / "Library" / "Application Support" / "freebuff"
-    elif sys.platform == "win32":
+    if sys.platform == "win32":
         appdata = Path.home() / "AppData" / "Roaming"
         return appdata / "freebuff"
-    else:
-        # Linux / other
-        xdg = Path.home() / ".config"
-        return xdg / "freebuff"
+    # Linux / other
+    xdg = Path.home() / ".config"
+    return xdg / "freebuff"
 
 
 def freebuff_config_path() -> Path:
@@ -81,11 +82,10 @@ def _manicode_credentials_path() -> Path:
     home = Path.home()
     if sys.platform == "darwin":
         return home / "Library" / "Application Support" / "manicode" / "credentials.json"
-    elif sys.platform == "win32":
-        appdata = home / "AppData" / "Roaming"
+    if sys.platform == "win32":
+        appdata = Path.home() / "AppData" / "Roaming"
         return appdata / "manicode" / "credentials.json"
-    else:
-        return home / ".config" / "manicode" / "credentials.json"
+    return home / ".config" / "manicode" / "credentials.json"
 
 
 def _read_token_from_json(path: Path) -> str | None:
@@ -93,7 +93,7 @@ def _read_token_from_json(path: Path) -> str | None:
     if not path.is_file():
         return None
     try:
-        with open(path, encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             cfg = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.debug(f"Failed to read {path}: {e}")
@@ -127,7 +127,7 @@ def get_token_from_config() -> str | None:
     creds_path = _manicode_credentials_path()
     if creds_path.is_file():
         try:
-            with open(creds_path, encoding="utf-8") as f:
+            with creds_path.open(encoding="utf-8") as f:
                 creds = json.load(f)
             for profile in creds.values():
                 if isinstance(profile, dict):
@@ -241,11 +241,10 @@ def install_freebuff() -> bool:
             version = get_freebuff_version() or "installed"
             console.print(f"[green]✓ freebuff {version} installed successfully[/green]")
             return True
-        else:
-            console.print(f"[red]✗ npm install failed:[/red]")
-            if result.stderr:
-                console.print(f"  {result.stderr.strip()}")
-            return False
+        console.print("[red]✗ npm install failed:[/red]")
+        if result.stderr:
+            console.print(f"  {result.stderr.strip()}")
+        return False
     except subprocess.TimeoutExpired:
         console.print("[red]✗ npm install timed out[/red]")
         return False
@@ -278,9 +277,8 @@ def run_auth_flow() -> bool:
                 env_path = save_token_to_env(token)
                 console.print(f"[green]✓ Token saved to {env_path}[/green]")
             return True
-        else:
-            console.print("[yellow]⚠ Auth flow was cancelled or failed.[/yellow]")
-            return False
+        console.print("[yellow]⚠ Auth flow was cancelled or failed.[/yellow]")
+        return False
     except subprocess.TimeoutExpired:
         console.print("[yellow]⚠ Auth flow timed out.[/yellow]")
         return False
@@ -289,9 +287,9 @@ def run_auth_flow() -> bool:
         return False
 
 
-# ── Full Setup ───────────────────────────────────────────────────────────
+# ── Full Freebuff Setup ──────────────────────────────────────────────────
 
-def setup_freebuff(auto_auth: bool = False) -> dict[str, str | bool]:
+def setup_freebuff(auto_auth: bool = False) -> dict[str, str | bool | None]:
     """Run the full freebuff setup flow.
 
     1. Check if installed → install if missing
@@ -304,7 +302,7 @@ def setup_freebuff(auto_auth: bool = False) -> dict[str, str | bool]:
       - authenticated: bool
       - token_source: str | None ("env", "config", or None)
     """
-    result: dict[str, str | bool] = {
+    result: dict[str, str | bool | None] = {
         "installed": False,
         "version": None,
         "authenticated": False,
@@ -312,9 +310,8 @@ def setup_freebuff(auto_auth: bool = False) -> dict[str, str | bool]:
     }
 
     # Step 1: Install
-    if not is_freebuff_installed():
-        if not install_freebuff():
-            return result
+    if not is_freebuff_installed() and not install_freebuff():
+        return result
 
     result["installed"] = True
     result["version"] = get_freebuff_version()
@@ -332,3 +329,224 @@ def setup_freebuff(auto_auth: bool = False) -> dict[str, str | bool]:
                 result["token_source"] = "env" if get_token_from_env() else "config"
 
     return result
+
+
+# ── OpenCode Setup ──────────────────────────────────────────────────────
+
+def _find_opencode_env_path() -> Path:
+    """Find or create the .env file path for OpenCode config."""
+    local = Path(".env")
+    if local.is_file():
+        return local
+    config_dir = Path.home() / ".config" / "agentcli"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir / ".env"
+
+
+def get_opencode_config() -> dict[str, str | None]:
+    """Get current OpenCode configuration from .env."""
+    from agentcli.config import get_settings
+    s = get_settings()
+    return {
+        "api_key": s.opencode_api_key or None,
+        "tier": s.opencode_tier or "zen",
+        "base_url": s.opencode_base_url or None,
+    }
+
+
+def save_opencode_config(
+    api_key: str,
+    tier: str = "zen",
+    env_path: Path | None = None,
+) -> Path:
+    """Save OpenCode API key and tier to .env file."""
+    from agentcli.providers.opencode import OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL
+
+    if env_path is None:
+        env_path = _find_opencode_env_path()
+
+    base_url = OPENCODE_GO_BASE_URL if tier == "go" else OPENCODE_ZEN_BASE_URL
+
+    lines: list[str] = []
+    key_written = tier_written = url_written = False
+
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("OPENCODE_API_KEY="):
+                lines.append(f"OPENCODE_API_KEY={api_key}")
+                key_written = True
+            elif stripped.startswith("OPENCODE_TIER="):
+                lines.append(f"OPENCODE_TIER={tier}")
+                tier_written = True
+            elif stripped.startswith("OPENCODE_BASE_URL="):
+                lines.append(f"OPENCODE_BASE_URL={base_url}")
+                url_written = True
+            else:
+                lines.append(line)
+
+    if not key_written:
+        lines.append(f"OPENCODE_API_KEY={api_key}")
+    if not tier_written:
+        lines.append(f"OPENCODE_TIER={tier}")
+    if not url_written:
+        lines.append(f"OPENCODE_BASE_URL={base_url}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_path
+
+
+def verify_opencode_key(api_key: str, tier: str = "zen") -> tuple[bool, str | None]:
+    """Verify an OpenCode API key by calling /models endpoint."""
+    import httpx
+
+    from agentcli.providers.opencode import OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL
+
+    base_url = OPENCODE_GO_BASE_URL if tier == "go" else OPENCODE_ZEN_BASE_URL
+
+    try:
+        with httpx.Client(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        ) as client:
+            resp = client.get("/models")
+            if resp.status_code == 200:
+                models_data = resp.json()
+                model_count = len(models_data.get("data", []))
+                return True, f"Valid key — {model_count} models available"
+            if resp.status_code == 401:
+                return False, "Invalid API key (401 Unauthorized)"
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return False, f"Verification failed: {e}"
+
+
+# ── Unified Multi-Provider Setup ────────────────────────────────────────
+
+def setup_provider(
+    provider: str,
+    *,
+    api_key: str | None = None,
+    tier: str | None = None,
+    auth: bool = False,
+    auto_install: bool = True,  # noqa: ARG001 reserved for future per-provider install control
+) -> dict[str, str | bool | None]:
+    """Unified setup for LLM providers.
+
+    Args:
+        provider: "freebuff" or "opencode"
+        api_key: API key for OpenCode (required for opencode)
+        tier: "zen" or "go" for OpenCode
+        auth: Run interactive auth flow for Freebuff
+        auto_install: Auto-install CLI for Freebuff
+
+    Returns:
+        Dict with setup status: installed, authenticated, version, token_source, etc.
+    """
+    result: dict[str, str | bool | None] = {
+        "provider": provider,
+        "installed": False,
+        "authenticated": False,
+        "version": None,
+        "token_source": None,
+    }
+
+    if provider == "freebuff":
+        # Step 1: Install
+        if not is_freebuff_installed() and not install_freebuff():
+            return result
+
+        result["installed"] = True
+        result["version"] = get_freebuff_version()
+
+        # Step 2: Check/configure auth
+        token = get_freebuff_token()
+        if token:
+            result["authenticated"] = True
+            result["token_source"] = "env" if get_token_from_env() else "config"
+        elif auth:
+            if run_auth_flow():
+                token = get_freebuff_token()
+                if token:
+                    result["authenticated"] = True
+                    result["token_source"] = "env" if get_token_from_env() else "config"
+
+    elif provider == "opencode":
+        if not api_key:
+            result["error"] = "OpenCode API key is required"
+            return result
+
+        tier = tier or "zen"
+        if tier not in ("zen", "go"):
+            result["error"] = "Invalid tier. Use 'zen' or 'go'"
+            return result
+
+        # Verify key
+        valid, msg = verify_opencode_key(api_key, tier)
+        if not valid:
+            result["error"] = f"OpenCode key verification failed: {msg}"
+            return result
+
+        # Save to .env
+        env_path = save_opencode_config(api_key, tier)
+        result["installed"] = True
+        result["authenticated"] = True
+        result["token_source"] = "env"
+        result["version"] = tier
+        result["env_path"] = str(env_path)
+
+    else:
+        result["error"] = f"Unknown provider: {provider}"
+
+    return result
+
+
+def setup_all(
+    *,
+    opencode_api_key: str | None = None,
+    opencode_tier: str | None = None,
+    freebuff_auth: bool = False,
+    freebuff_auto_install: bool = True,
+) -> dict[str, dict]:
+    """Set up all configured providers in one call.
+
+    Args:
+        opencode_api_key: OpenCode API key (optional)
+        opencode_tier: "zen" or "go" for OpenCode
+        freebuff_auth: Run Freebuff auth flow
+        freebuff_auto_install: Auto-install Freebuff CLI
+
+    Returns:
+        Dict mapping provider name to its setup result.
+    """
+    results = {}
+
+    # OpenCode setup
+    if opencode_api_key:
+        results["opencode"] = setup_provider(
+            "opencode",
+            api_key=opencode_api_key,
+            tier=opencode_tier,
+        )
+    else:
+        # Check if already configured
+        from agentcli.config import get_settings
+        s = get_settings()
+        if s.opencode_api_key:
+            results["opencode"] = {
+                "provider": "opencode",
+                "installed": True,
+                "authenticated": True,
+                "version": s.opencode_tier,
+                "token_source": "env",
+            }
+
+    # Freebuff setup
+    results["freebuff"] = setup_provider(
+        "freebuff",
+        auth=freebuff_auth,
+        auto_install=freebuff_auto_install,
+    )
+
+    return results

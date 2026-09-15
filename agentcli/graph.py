@@ -20,6 +20,44 @@ class UnknownDependencyError(GraphError):
     pass
 
 
+def _coerce_str_list(value: object) -> list[str]:
+    """Coerce a contract field into a list of strings, tolerantly.
+
+    Accepts a proper list of strings, a single string, a comma-separated
+    string, or None. Anything else becomes an empty list.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [p.strip() for p in value.split(",") if p.strip()]
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                # Tolerate {"description": "..."} style entries
+                text = str(
+                    item.get("description") or item.get("text") or item.get("name") or ""
+                ).strip()
+                if text:
+                # fall through to str() of a bare value
+                    out.append(text)
+            elif item is not None:
+                text = str(item).strip()
+                if text:
+                    out.append(text)
+        return out
+    return []
+
+
+def _coerce_str_dict(value: object) -> dict[str, str]:
+    """Coerce an optional dictionary of strings (e.g. assumptions)."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items() if v is not None}
+
+
 def build_graph_from_planner_output(
     planner_json: dict[str, Any],
     max_tasks: int = 20,
@@ -63,6 +101,9 @@ def build_graph_from_planner_output(
             depends_on=depends_on,
             task_type=task_type,
             complexity=complexity,
+            expected_inputs=_coerce_str_list(task_data.get("expected_inputs")),
+            expected_outputs=_coerce_str_list(task_data.get("expected_outputs")),
+            validation_criteria=_coerce_str_list(task_data.get("validation_criteria")),
         )
         graph.add_task(task)
 
@@ -244,7 +285,7 @@ def render_dag_ascii(
             )
             if has_branch:
                 merge_parts: list[str] = []
-                for i, t in enumerate(level_tasks):
+                for t in level_tasks:
                     child_count = len(
                         [c for c in children.get(t.id, []) if c in {nt.id for nt in next_tasks}]
                     )

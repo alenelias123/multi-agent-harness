@@ -427,7 +427,7 @@ class Dashboard(App):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("e", "toggle_edit", "Edit Mode"),
@@ -991,13 +991,13 @@ class Dashboard(App):
         self.query_one("#edit-deps", Input).value = ", ".join(task.get("depends_on", []))
 
         type_select = self.query_one("#edit-type", Select)
-        for option in type_select.options:
+        for option in type_select._options:
             if option[1] == task.get("task_type", "general"):
                 type_select.value = option[1]
                 break
 
         complexity_select = self.query_one("#edit-complexity", Select)
-        for option in complexity_select.options:
+        for option in complexity_select._options:
             if option[1] == task.get("complexity", "medium"):
                 complexity_select.value = option[1]
                 break
@@ -1633,7 +1633,7 @@ class Dashboard(App):
             with contextlib.suppress(Exception):
                 self._chat_close_task = asyncio.create_task(_close())
 
-    def action_quit(self) -> None:
+    async def action_quit(self) -> None:
         """Quit the dashboard."""
         self.exit(None)
 
@@ -1641,12 +1641,10 @@ class Dashboard(App):
 # ── Standalone entry point ─────────────────────────────────────────────────
 
 
-def run_dashboard(run_id: str | None = None) -> None:
+def run_dashboard(run_id: str | None = None) -> object | None:
     """Launch the TUI dashboard."""
     app = Dashboard(run_id=run_id)
-    result = app.run()
+    result: object | None = app.run()
 
     # If the user approved a plan, return it
-    if result:
-        return result
-    return None
+    return result

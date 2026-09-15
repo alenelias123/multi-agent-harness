@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -12,7 +10,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agentcli.sessions import (
-    SESSION_DATA_DIR,
     SessionInfo,
     SessionManager,
     TmuxError,
@@ -35,7 +32,7 @@ class TestTmuxAvailability:
         assert is_tmux_available() is False
 
     @patch("agentcli.sessions.subprocess.run", side_effect=FileNotFoundError)
-    def test_is_tmux_available_not_installed(self, mock_run: MagicMock) -> None:
+    def test_is_tmux_available_not_installed(self, mock_run: MagicMock) -> None:  # noqa: ARG002
         assert is_tmux_available() is False
 
 
@@ -45,7 +42,7 @@ class TestSessionMetaPersistence:
         self._patcher = patch("agentcli.sessions.SESSION_DATA_DIR")
         self.mock_dir = self._patcher.start()
         self.tmpdir = Path(tempfile.mkdtemp())
-        self.mock_dir.__truediv__ = lambda self_, x: self.tmpdir / x
+        self.mock_dir.__truediv__ = lambda _self, x: self.tmpdir / x
         # Patch glob to work with the mock
         self.mock_dir.glob = lambda pattern: self.tmpdir.glob(pattern)
 
@@ -83,7 +80,7 @@ class TestSessionManager:
         self._patcher = patch("agentcli.sessions.SESSION_DATA_DIR")
         self.mock_dir = self._patcher.start()
         self.tmpdir = Path(tempfile.mkdtemp())
-        self.mock_dir.__truediv__ = lambda self_, x: self.tmpdir / x
+        self.mock_dir.__truediv__ = lambda _self, x: self.tmpdir / x
         self.mock_dir.glob = lambda pattern: self.tmpdir.glob(pattern)
         self.mock_dir.mkdir = lambda *a, **kw: self.tmpdir.mkdir(*a, **kw)
 
@@ -137,7 +134,7 @@ class TestSessionManager:
         self, _mock_avail: MagicMock, mock_tmux: MagicMock
     ) -> None:
         # First call: list-sessions returns our tmux session as active
-        def side_effect(*args: str, **kwargs: object) -> MagicMock:
+        def side_effect(*args: str, **kwargs: object) -> MagicMock:  # noqa: ARG001
             if "list-sessions" in args:
                 return MagicMock(returncode=0, stdout="agentcli-abc123\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -156,7 +153,7 @@ class TestSessionManager:
     @patch("agentcli.sessions._run_tmux")
     @patch("agentcli.sessions.is_tmux_available", return_value=True)
     def test_get_session(self, _mock_avail: MagicMock, mock_tmux: MagicMock) -> None:
-        def side_effect(*args: str, **kwargs: object) -> MagicMock:
+        def side_effect(*args: str, **kwargs: object) -> MagicMock:  # noqa: ARG001
             if "list-sessions" in args:
                 return MagicMock(returncode=0, stdout="agentcli-abc123\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -182,7 +179,7 @@ class TestSessionManager:
     @patch("agentcli.sessions._run_tmux")
     @patch("agentcli.sessions.is_tmux_available", return_value=True)
     def test_kill_session(self, _mock_avail: MagicMock, mock_tmux: MagicMock) -> None:
-        def side_effect(*args: str, **kwargs: object) -> MagicMock:
+        def side_effect(*args: str, **kwargs: object) -> MagicMock:  # noqa: ARG001
             if "list-sessions" in args:
                 return MagicMock(returncode=0, stdout="agentcli-abc123\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -204,7 +201,7 @@ class TestSessionManager:
     def test_kill_all_sessions(
         self, _mock_avail: MagicMock, mock_tmux: MagicMock
     ) -> None:
-        def side_effect(*args: str, **kwargs: object) -> MagicMock:
+        def side_effect(*args: str, **kwargs: object) -> MagicMock:  # noqa: ARG001
             if "list-sessions" in args:
                 return MagicMock(
                     returncode=0, stdout="agentcli-aaa\nagentcli-bbb\n", stderr=""
@@ -225,7 +222,7 @@ class TestSessionManager:
     @patch("agentcli.sessions._run_tmux")
     @patch("agentcli.sessions.is_tmux_available", return_value=True)
     def test_send_message(self, _mock_avail: MagicMock, mock_tmux: MagicMock) -> None:
-        def side_effect(*args: str, **kwargs: object) -> MagicMock:
+        def side_effect(*args: str, **kwargs: object) -> MagicMock:  # noqa: ARG001
             if "list-sessions" in args:
                 return MagicMock(returncode=0, stdout="agentcli-abc123\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -253,7 +250,7 @@ class TestSessionManager:
     @patch("agentcli.sessions._run_tmux")
     @patch("agentcli.sessions.is_tmux_available", return_value=True)
     def test_get_logs(self, _mock_avail: MagicMock, mock_tmux: MagicMock) -> None:
-        def side_effect(*args: str, **kwargs: object) -> MagicMock:
+        def side_effect(*args: str, **kwargs: object) -> MagicMock:  # noqa: ARG001
             if "list-sessions" in args:
                 return MagicMock(returncode=0, stdout="agentcli-abc123\n", stderr="")
             if "capture-pane" in args:

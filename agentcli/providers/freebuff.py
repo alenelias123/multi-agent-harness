@@ -25,11 +25,11 @@ def _find_freebuff_config_token() -> str | None:
     home = Path.home()
     if os.environ.get("XDG_CONFIG_HOME"):
         config_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "freebuff"
-    elif home / ".config" / "freebuff" .is_dir():
+    elif (home / ".config" / "freebuff").is_dir():
         config_dir = home / ".config" / "freebuff"
-    elif home / "Library" / "Application Support" / "freebuff" .is_dir():
+    elif (home / "Library" / "Application Support" / "freebuff").is_dir():
         config_dir = home / "Library" / "Application Support" / "freebuff"
-    elif home / ".freebuff" .is_dir():
+    elif (home / ".freebuff").is_dir():
         config_dir = home / ".freebuff"
     else:
         config_dir = home / ".config" / "freebuff"
@@ -39,7 +39,7 @@ def _find_freebuff_config_token() -> str | None:
         return None
 
     try:
-        with open(config_file, encoding="utf-8") as f:
+        with config_file.open(encoding="utf-8") as f:
             cfg = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.debug(f"Failed to read freebuff config: {e}")
@@ -150,11 +150,11 @@ class FreebuffClient(BaseProvider):
 
     async def chat_completion(
         self,
-        model: str,
+        model: str,  # noqa: ARG002
         messages: list[dict[str, str]],
-        temperature: float = 0.3,
-        max_tokens: int = 4000,
-        response_format: dict[str, Any] | None = None,
+        temperature: float = 0.3,  # noqa: ARG002
+        max_tokens: int = 4000,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
     ) -> str:
         """Invoke the freebuff CLI and capture its output.
 
@@ -180,7 +180,7 @@ class FreebuffClient(BaseProvider):
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=self.timeout
             )
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise FreebuffError(
                 f"Freebuff CLI timed out after {self.timeout}s"
             ) from e

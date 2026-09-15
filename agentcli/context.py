@@ -26,11 +26,11 @@ import logging
 import sqlite3
 import time
 from collections import defaultdict
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +220,6 @@ class SharedContext:
         )
 
         # Update in-memory cache
-        cache_key = f"{namespace}:{key}"
         self._memory_cache[namespace][key] = entry
 
         # Persist to SQLite
@@ -271,7 +270,8 @@ class SharedContext:
             self.delete(key, namespace)
             return None
 
-        return row["value"]
+        value: str | None = row["value"]
+        return value
 
     def read_all(
         self,
@@ -592,7 +592,7 @@ class AgentReference:
 
     # ── dict-like helpers ────────────────────────────────────────────────
 
-    def entries(self) -> list[tuple[str, str, ContextEntry]]:
+    def entries(self) -> Iterator[tuple[str, str, ContextEntry]]:
         """Yield ``(namespace, key, ContextEntry)`` triples."""
         for ns, keys in self.namespaces.items():
             for key, payload in keys.items():
@@ -695,7 +695,7 @@ class AgentReference:
         Returns the number of entries written.
         """
         count = 0
-        for ns, key, entry in self.entries():
+        for entry in self.to_context_entries():
             context.write(
                 key=entry.key,
                 value=entry.value,

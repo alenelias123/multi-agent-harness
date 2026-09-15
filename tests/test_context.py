@@ -6,8 +6,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
 from agentcli.context import (
     AgentContext,
     ContextBridge,
